@@ -25,8 +25,9 @@ import (
 // The rules for traffic from local Pod to LoadBalancer Service are the same with rules for Cluster Service.
 // For the LoadBalancer Service traffic from outside, specific rules are install to forward the packets
 // to the host network to let kube-proxy handle the traffic.
+// Note that, NodePort Service is not supported on Windows currently.
 func (p *proxier) installLoadBalancerServiceFlows(groupID binding.GroupIDType, svcIP net.IP, svcPort uint16, protocol binding.Protocol, affinityTimeout uint16) error {
-	if err := p.ofClient.InstallServiceFlows(groupID, svcIP, svcPort, protocol, affinityTimeout); err != nil {
+	if err := p.ofClient.InstallServiceFlows(groupID, svcIP, svcPort, protocol, affinityTimeout, false, false); err != nil {
 		return err
 	}
 	if err := p.ofClient.InstallLoadBalancerServiceFromOutsideFlows(svcIP, svcPort, protocol); err != nil {

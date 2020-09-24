@@ -26,15 +26,19 @@ import (
 	"github.com/containernetworking/plugins/pkg/ip"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
+	netutils "k8s.io/utils/net"
 
 	"antrea.io/antrea/pkg/agent/config"
+	proxytypes "antrea.io/antrea/pkg/agent/proxy/types"
 	"antrea.io/antrea/pkg/agent/types"
 	"antrea.io/antrea/pkg/agent/util"
 	"antrea.io/antrea/pkg/agent/util/ipset"
 	"antrea.io/antrea/pkg/agent/util/iptables"
+	"antrea.io/antrea/pkg/features"
 	"antrea.io/antrea/pkg/ovs/ovsconfig"
 	"antrea.io/antrea/pkg/util/env"
 )
@@ -67,6 +71,9 @@ var (
 	// IPTablesSyncInterval is exported so that sync interval can be configured for running integration test with
 	// smaller values. It is meant to be used internally by Run.
 	IPTablesSyncInterval = 60 * time.Second
+
+	nodePortVirtualIP   = net.ParseIP("169.254.169.253")
+	nodePortVirtualIPv6 = net.ParseIP("fc01::aabb:ccdd:eeff")
 )
 
 // Client takes care of routing container packets in host network, coordinating ip route, ip rule, iptables and ipset.
@@ -431,6 +438,24 @@ func (c *Client) restoreIptablesData(podCIDR *net.IPNet, podIPSet string, snatMa
 		"-j", iptables.MasqueradeTarget, "--random-fully",
 	}...)
 
+	if features.DefaultFeatureGate.Enabled(features.AntreaProxyNodePort) {
+		if netutils.IsIPv6(podCIDR.IP) {
+			writeLine(iptablesData, []string{
+				"-A", antreaPostRoutingChain,
+				"-m", "comment", "--comment", `"Antrea: masquerade NodePort host network Endpoint traffic"`,
+				"-s", nodePortVirtualIPv6.String(),
+				"-j", iptables.MasqueradeTarget,
+			}...)
+		} else {
+			writeLine(iptablesData, []string{
+				"-A", antreaPostRoutingChain,
+				"-m", "comment", "--comment", `"Antrea: masquerade NodePort host network Endpoint traffic"`,
+				"-s", nodePortVirtualIP.String(),
+				"-j", iptables.MasqueradeTarget,
+			}...)
+		}
+	}
+
 	writeLine(iptablesData, "COMMIT")
 	return iptablesData
 }
@@ -476,7 +501,7 @@ func (c *Client) Reconcile(podCIDRs []string) error {
 		}
 	}
 
-	// Remove any unknown routes on antrea-gw0.
+	// Remove any unknown routes on Antrea gateway.
 	routes, err := c.listIPRoutesOnGW()
 	if err != nil {
 		return fmt.Errorf("error listing ip routes: %v", err)
@@ -495,7 +520,7 @@ func (c *Client) Reconcile(podCIDRs []string) error {
 		}
 	}
 
-	// Remove any unknown IPv6 neighbors on antrea-gw0.
+	// Remove any unknown IPv6 neighbors on Antrea gateway.
 	desiredGWs := getIPv6Gateways(podCIDRs)
 	// Return immediately if there is no IPv6 gateway address configured on the Nodes.
 	if desiredGWs.Len() == 0 {
@@ -518,7 +543,7 @@ func (c *Client) Reconcile(podCIDRs []string) error {
 	return nil
 }
 
-// listIPRoutes returns list of routes on antrea-gw0.
+// listIPRoutes returns list of routes on Antrea gateway.
 func (c *Client) listIPRoutesOnGW() ([]netlink.Route, error) {
 	filter := &netlink.Route{
 		LinkIndex: c.nodeConfig.GatewayConfig.LinkIndex}
@@ -772,4 +797,180 @@ func (c *Client) DeleteSNATRule(mark uint32) error {
 	c.markToSNATIP.Delete(mark)
 	snatIP := value.(net.IP)
 	return c.ipt.DeleteRule(iptables.NATTable, antreaPostRoutingChain, c.snatRuleSpec(snatIP, mark))
+}
+
+func (c *Client) addNodePortRoute(isIPv6 bool) error {
+	var route *netlink.Route
+	var nodeportIP *net.IP
+
+	if !isIPv6 {
+		nodeportIP = &nodePortVirtualIP
+		route = &netlink.Route{
+			Dst: &net.IPNet{
+				IP:   *nodeportIP,
+				Mask: net.IPv4Mask(255, 255, 255, 255),
+			},
+			Gw:    *nodeportIP,
+			Flags: int(netlink.FLAG_ONLINK),
+		}
+		route.LinkIndex = c.nodeConfig.GatewayConfig.LinkIndex
+	} else {
+		nodeportIP = &nodePortVirtualIPv6
+		route = &netlink.Route{
+			Dst: &net.IPNet{
+				IP:   *nodeportIP,
+				Mask: net.IPMask{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+			},
+			LinkIndex: c.nodeConfig.GatewayConfig.LinkIndex,
+		}
+	}
+	if err := netlink.RouteReplace(route); err != nil {
+		return fmt.Errorf("failed to install NodePort route: %w", err)
+	}
+
+	if isIPv6 {
+		neigh := &netlink.Neigh{
+			LinkIndex:    c.nodeConfig.GatewayConfig.LinkIndex,
+			Family:       netlink.FAMILY_V6,
+			State:        netlink.NUD_PERMANENT,
+			IP:           *nodeportIP,
+			HardwareAddr: globalVMAC,
+		}
+		if err := netlink.NeighSet(neigh); err != nil {
+			return fmt.Errorf("failed to add NodePort route neighbor %v to gw %s: %v", neigh, c.nodeConfig.GatewayConfig.Name, err)
+		}
+		c.nodeNeighbors.Store(nodeportIP.String(), neigh)
+	}
+	c.nodeRoutes.Store(nodeportIP.String(), []*netlink.Route{route})
+	return nil
+}
+
+func (c *Client) InitNodePort(nodePortIPMap map[int][]net.IP, isIPv6 bool) error {
+	err := c.addNodePortRoute(isIPv6)
+	if err != nil {
+		return err
+	}
+
+	// Add a ingress qdisc to every interface which has available NodePort IP addresses. When a NodePort Service is
+	// created, for every interface which has available NodePort IP addresses, a filter matching destination IP address
+	// (NodePort IP address) and destination protocol/port(NodePort protocol/port) will be created and attached to
+	// the ingress qdisc, and its action is redirecting matched traffic to antrea gateway's egress. Note that, this
+	// filter is used to match NodePort request traffic.
+	for ifIndex := range nodePortIPMap {
+		handle := qdiscHandleIngress
+		if ifIndex == loopbackIfIndex {
+			handle = qdiscHandleEgress
+		}
+
+		exist, err := qdiscCheck(handle, ifIndex)
+		if err != nil {
+			return err
+		}
+		if !exist {
+			err = qdiscAdd(handle, ifIndex)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	gatewayIfIndex := getIndexByName(c.nodeConfig.GatewayConfig.Name)
+	// Add qdisc to Antrea gateway as its index is not in nodePortIPMap.
+	exist, err := qdiscCheck(qdiscHandleIngress, gatewayIfIndex)
+	if err != nil {
+		return err
+	}
+	if !exist {
+		err = qdiscAdd(qdiscHandleIngress, gatewayIfIndex)
+		if err != nil {
+			return err
+		}
+	}
+
+	// The design of filter for Antrea gateway is hierarchic. Here add basic filters to Antrea gateway. Note that, these
+	// filters are used to match NodePort response traffic. These filters are used to distribute packets to different sub filter
+	// chains according to their source IP Addresses(NodePort IP addresses). When a NodePort Service is created, a filter
+	// matching source IP address (NodePort IP address) and source protocol/port(NodePort protocol/port) will created and
+	// attached to every sub filter chain, and its action is redirecting matched traffic to an interface's egress.
+	for ifIndex, addrs := range nodePortIPMap {
+		err = gatewayBasicFiltersAdd(ifIndex, addrs, c.nodeConfig.GatewayConfig.Name)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *Client) AddNodePort(nodePortIPMap map[int][]net.IP, svcInfo *proxytypes.ServiceInfo, isIPv6 bool) error {
+	port := uint32(svcInfo.NodePort())
+	protocol := getProtocol(svcInfo.Protocol())
+
+	for ifIndex, addrs := range nodePortIPMap {
+		if isIPv6 {
+			err := gatewayFilterAdd(ifIndex, unix.IPPROTO_IPV6, protocol, port, c.nodeConfig.GatewayConfig.Name)
+			if err != nil {
+				return err
+			}
+		} else {
+			err := gatewayFilterAdd(ifIndex, unix.IPPROTO_IP, protocol, port, c.nodeConfig.GatewayConfig.Name)
+			if err != nil {
+				return err
+			}
+		}
+
+		err := interfaceFiltersAdd(ifIndex, protocol, port, addrs, c.nodeConfig.GatewayConfig.Name)
+		if err != nil {
+			return err
+		}
+
+		err = loopbackFiltersAdd(ifIndex, protocol, port, addrs, c.nodeConfig.GatewayConfig.Name, c.nodeConfig.GatewayConfig.MAC.String())
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *Client) DeleteNodePort(nodePortIPMap map[int][]net.IP, svcInfo *proxytypes.ServiceInfo, isIPv6 bool) error {
+	port := uint32(svcInfo.NodePort())
+	protocol := getProtocol(svcInfo.Protocol())
+
+	for ifIndex, addrs := range nodePortIPMap {
+		if isIPv6 {
+			err := gatewayFilterDel(ifIndex, unix.IPPROTO_IPV6, protocol, port, c.nodeConfig.GatewayConfig.Name)
+			if err != nil {
+				return err
+			}
+		} else {
+			err := gatewayFilterDel(ifIndex, unix.IPPROTO_IP, protocol, port, c.nodeConfig.GatewayConfig.Name)
+			if err != nil {
+				return err
+			}
+		}
+
+		err := interfaceFiltersDel(ifIndex, protocol, port, addrs)
+		if err != nil {
+			return err
+		}
+
+		err = loopbackFiltersDel(ifIndex, protocol, port, addrs)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func getProtocol(protocol v1.Protocol) int {
+	if protocol == v1.ProtocolTCP {
+		return unix.IPPROTO_TCP
+	} else if protocol == v1.ProtocolUDP {
+		return unix.IPPROTO_UDP
+	} else if protocol == v1.ProtocolSCTP {
+		return unix.IPPROTO_SCTP
+	}
+	return -1
 }

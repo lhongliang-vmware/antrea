@@ -46,6 +46,10 @@ const (
 	// Service traffic.
 	AntreaProxy featuregate.Feature = "AntreaProxy"
 
+	// alpha: v1.3
+	// Enable NodePort Service support in AntreaProxy in antrea-agent.
+	AntreaProxyNodePort featuregate.Feature = "AntreaProxyNodePort"
+
 	// alpha: v0.8
 	// beta: v0.11
 	// Allows to trace path from a generated packet.
@@ -80,14 +84,15 @@ var (
 	// To add a new feature, define a key for it above and add it here. The features will be
 	// available throughout Antrea binaries.
 	DefaultAntreaFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-		AntreaPolicy:       {Default: true, PreRelease: featuregate.Beta},
-		AntreaProxy:        {Default: true, PreRelease: featuregate.Beta},
-		Egress:             {Default: false, PreRelease: featuregate.Alpha},
-		EndpointSlice:      {Default: false, PreRelease: featuregate.Alpha},
-		Traceflow:          {Default: true, PreRelease: featuregate.Beta},
-		FlowExporter:       {Default: false, PreRelease: featuregate.Alpha},
-		NetworkPolicyStats: {Default: false, PreRelease: featuregate.Alpha},
-		NodePortLocal:      {Default: false, PreRelease: featuregate.Alpha},
+		AntreaPolicy:        {Default: true, PreRelease: featuregate.Beta},
+		AntreaProxy:         {Default: true, PreRelease: featuregate.Beta},
+		Egress:              {Default: false, PreRelease: featuregate.Alpha},
+		EndpointSlice:       {Default: false, PreRelease: featuregate.Alpha},
+		AntreaProxyNodePort: {Default: false, PreRelease: featuregate.Alpha},
+		Traceflow:           {Default: true, PreRelease: featuregate.Beta},
+		FlowExporter:        {Default: false, PreRelease: featuregate.Alpha},
+		NetworkPolicyStats:  {Default: false, PreRelease: featuregate.Alpha},
+		NodePortLocal:       {Default: false, PreRelease: featuregate.Alpha},
 	}
 
 	// UnsupportedFeaturesOnWindows records the features not supported on
@@ -101,8 +106,9 @@ var (
 	// can have different FeatureSpecs between Linux and Windows, we should
 	// still define a separate defaultAntreaFeatureGates map for Windows.
 	unsupportedFeaturesOnWindows = map[featuregate.Feature]struct{}{
-		NodePortLocal: {},
-		Egress:        {},
+		AntreaProxyNodePort: {},
+		NodePortLocal:       {},
+		Egress:              {},
 	}
 )
 

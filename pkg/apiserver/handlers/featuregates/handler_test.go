@@ -53,6 +53,7 @@ func Test_getGatesResponse(t *testing.T) {
 				{Component: "agent", Name: "FlowExporter", Status: "Disabled", Version: "ALPHA"},
 				{Component: "agent", Name: "NetworkPolicyStats", Status: "Disabled", Version: "ALPHA"},
 				{Component: "agent", Name: "NodePortLocal", Status: "Disabled", Version: "ALPHA"},
+				{Component: "agent", Name: "AntreaProxyNodePort", Status: "Disabled", Version: "ALPHA"},
 			},
 		},
 	}

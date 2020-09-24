@@ -27,6 +27,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"antrea.io/antrea/pkg/agent/config"
+	"antrea.io/antrea/pkg/agent/proxy/types"
 	"antrea.io/antrea/pkg/agent/util"
 	"antrea.io/antrea/pkg/agent/util/winfirewall"
 )
@@ -35,6 +36,9 @@ const (
 	inboundFirewallRuleName  = "Antrea: accept packets from local Pods"
 	outboundFirewallRuleName = "Antrea: accept packets to local Pods"
 )
+
+// Client implements Interface.
+var _ Interface = &Client{}
 
 type Client struct {
 	nr             netroute.Interface
@@ -238,5 +242,17 @@ func (c *Client) AddSNATRule(snatIP net.IP, mark uint32) error {
 }
 
 func (c *Client) DeleteSNATRule(mark uint32) error {
+	return nil
+}
+
+func (c *Client) InitNodePort(nodePortIPMap map[int][]net.IP, isIPv6 bool) error {
+	return nil
+}
+
+func (c *Client) AddNodePort(nodePortIPMap map[int][]net.IP, svcInfo *types.ServiceInfo, isIPv6 bool) error {
+	return nil
+}
+
+func (c *Client) DeleteNodePort(nodePortIPMap map[int][]net.IP, svcInfo *types.ServiceInfo, isIPv6 bool) error {
 	return nil
 }

@@ -49,9 +49,9 @@ type Client interface {
 	// the Cluster Service CIDR as a parameter.
 	InstallClusterServiceCIDRFlows(serviceNets []*net.IPNet) error
 
-	// InstallClusterServiceFlows sets up the appropriate flows so that traffic can reach
+	// InstallDefaultServiceFlows sets up the appropriate flows so that traffic can reach
 	// the different Services running in the Cluster. This method needs to be invoked once.
-	InstallClusterServiceFlows() error
+	InstallDefaultServiceFlows() error
 
 	// InstallDefaultTunnelFlows sets up the classification flow for the default (flow based) tunnel.
 	InstallDefaultTunnelFlows() error
@@ -108,7 +108,8 @@ type Client interface {
 	// action to maintain the LB decision.
 	// The group with the groupID must be installed before, otherwise the
 	// installation will fail.
-	InstallServiceFlows(groupID binding.GroupIDType, svcIP net.IP, svcPort uint16, protocol binding.Protocol, affinityTimeout uint16) error
+	// InstallServiceFlows also installs flows related to NodePort.
+	InstallServiceFlows(groupID binding.GroupIDType, svcIP net.IP, svcPort uint16, protocol binding.Protocol, affinityTimeout uint16, NodePort, isNodePortLocalExternal bool) error
 	// UninstallServiceFlows removes flows installed by InstallServiceFlows.
 	UninstallServiceFlows(svcIP net.IP, svcPort uint16, protocol binding.Protocol) error
 	// InstallLoadBalancerServiceFromOutsideFlows installs flows for LoadBalancer Service traffic from outside node.
@@ -396,6 +397,16 @@ func (c *client) InstallNodeFlows(hostname string,
 			flows = append(flows, c.l3FwdFlowToRemote(localGatewayMAC, *peerPodCIDR, tunnelPeerIP, cookie.Node))
 		} else {
 			flows = append(flows, c.l3FwdFlowToRemoteViaRouting(localGatewayMAC, remoteGatewayMAC, cookie.Node, tunnelPeerIP, peerPodCIDR)...)
+			// For NodePort traffic from remote, its Endpoints are not on local node, the traffic should be sent out of
+			// OVS via Antrea gateway, and this is hairpin traffic.
+			if c.enabledAntreaNodePort {
+				if c.IsIPv4Enabled() {
+					flows = append(flows, c.noEncapNodePortSNATFlow(c.nodeConfig.GatewayConfig.IPv4, *peerPodCIDR))
+				}
+				if c.IsIPv6Enabled() {
+					flows = append(flows, c.noEncapNodePortSNATFlow(c.nodeConfig.GatewayConfig.IPv6, *peerPodCIDR))
+				}
+			}
 		}
 	}
 
@@ -538,11 +549,27 @@ func (c *client) UninstallEndpointFlows(protocol binding.Protocol, endpoint prox
 	return c.deleteFlows(c.serviceFlowCache, cacheKey)
 }
 
-func (c *client) InstallServiceFlows(groupID binding.GroupIDType, svcIP net.IP, svcPort uint16, protocol binding.Protocol, affinityTimeout uint16) error {
+func (c *client) InstallServiceFlows(groupID binding.GroupIDType, svcIP net.IP, svcPort uint16, protocol binding.Protocol, affinityTimeout uint16, nodePort, isNodePortLocalExternal bool) error {
 	c.replayMutex.RLock()
 	defer c.replayMutex.RUnlock()
 	var flows []binding.Flow
+
 	flows = append(flows, c.serviceLBFlow(groupID, svcIP, svcPort, protocol, affinityTimeout != 0))
+	if c.enabledAntreaNodePort && nodePort {
+		var gatewayIP net.IP
+		if getIPProtocol(svcIP) == binding.ProtocolIP && c.nodeConfig.GatewayConfig.IPv4 != nil {
+			gatewayIP = c.nodeConfig.GatewayConfig.IPv4
+		} else if getIPProtocol(svcIP) == binding.ProtocolIPv6 && c.nodeConfig.GatewayConfig.IPv6 != nil {
+			gatewayIP = c.nodeConfig.GatewayConfig.IPv6
+		} else {
+			// TODO: how to do with PolicyOnly mode
+			return fmt.Errorf("there is no IPv4/IPv6 address on Antrea gateway to do SNAT for Service traffic")
+		}
+
+		flows = append(flows, c.serviceSNATFlows(svcIP, svcPort, protocol, gatewayIP, isNodePortLocalExternal)...)
+		flows = append(flows, c.serviceDstMacRewriteFlow(svcIP, svcPort, protocol))
+	}
+
 	if affinityTimeout != 0 {
 		flows = append(flows, c.serviceLearnFlow(groupID, svcIP, svcPort, protocol, affinityTimeout))
 	}
@@ -567,8 +594,7 @@ func (c *client) GetServiceFlowKeys(svcIP net.IP, svcPort uint16, protocol bindi
 	}
 	return flowKeys
 }
-
-func (c *client) InstallClusterServiceFlows() error {
+func (c *client) InstallDefaultServiceFlows() error {
 	flows := []binding.Flow{
 		c.serviceNeedLBFlow(),
 		c.sessionAffinityReselectFlow(),
@@ -577,10 +603,23 @@ func (c *client) InstallClusterServiceFlows() error {
 	if c.IsIPv4Enabled() {
 		flows = append(flows, c.serviceHairpinResponseDNATFlow(binding.ProtocolIP))
 		flows = append(flows, c.serviceLBBypassFlows(binding.ProtocolIP)...)
+		if c.enabledAntreaNodePort {
+			gatewayIP := c.nodeConfig.GatewayConfig.IPv4
+			flows = append(flows, c.arpResponderFlow(nodePortVirtualIP, cookie.Service))
+			flows = append(flows, c.l3NodePortFlowToHostEndpointViaGW(gatewayIP, cookie.Service))
+			flows = append(flows, c.nodePortHostEndpointSNATFlow(gatewayIP))
+			flows = append(flows, c.nodePortHostEndpointResponseDNATFlow(gatewayIP))
+		}
 	}
 	if c.IsIPv6Enabled() {
 		flows = append(flows, c.serviceHairpinResponseDNATFlow(binding.ProtocolIPv6))
 		flows = append(flows, c.serviceLBBypassFlows(binding.ProtocolIPv6)...)
+		if c.enabledAntreaNodePort {
+			gatewayIP := c.nodeConfig.GatewayConfig.IPv6
+			flows = append(flows, c.l3NodePortFlowToHostEndpointViaGW(gatewayIP, cookie.Service))
+			flows = append(flows, c.nodePortHostEndpointSNATFlow(gatewayIP))
+			flows = append(flows, c.nodePortHostEndpointResponseDNATFlow(gatewayIP))
+		}
 	}
 	if err := c.ofEntryOperations.AddAll(flows); err != nil {
 		return err
@@ -612,6 +651,8 @@ func (c *client) InstallGatewayFlows() error {
 	if gatewayConfig.IPv4 != nil {
 		gatewayIPs = append(gatewayIPs, gatewayConfig.IPv4)
 		flows = append(flows, c.gatewayARPSpoofGuardFlow(gatewayConfig.IPv4, gatewayConfig.MAC, cookie.Default))
+		// This is for NodePort virtual IPv4 ARP resolution. The ARP request source IP is node's IP, not Antrea gateway's IP.
+		flows = append(flows, c.gatewayARPSpoofGuardFlow(c.nodeConfig.NodeIPAddr.IP, gatewayConfig.MAC, cookie.Default))
 	}
 	if gatewayConfig.IPv6 != nil {
 		gatewayIPs = append(gatewayIPs, gatewayConfig.IPv6)

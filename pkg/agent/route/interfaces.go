@@ -18,6 +18,7 @@ import (
 	"net"
 
 	"antrea.io/antrea/pkg/agent/config"
+	"antrea.io/antrea/pkg/agent/proxy/types"
 )
 
 // Interface is the interface for routing container packets in host network.
@@ -50,6 +51,15 @@ type Interface interface {
 
 	// DeleteSNATRule should delete rule to SNAT outgoing traffic with the mark.
 	DeleteSNATRule(mark uint32) error
+
+	// InitNodePort should add the basic TC configuration on Linux.
+	InitNodePort(nodePortIPMap map[int][]net.IP, isIPv6 bool) error
+
+	// AddNodePort should add related configuration about the NodePort Service to TC on Linux.
+	AddNodePort(nodePortIPMap map[int][]net.IP, svcInfo *types.ServiceInfo, isIPv6 bool) error
+
+	// DeleteNodePort should delete related configuration about the NodePort Service to TC on Linux.
+	DeleteNodePort(nodePortIPMap map[int][]net.IP, svcInfo *types.ServiceInfo, isIPv6 bool) error
 
 	// Run starts the sync loop.
 	Run(stopCh <-chan struct{})
