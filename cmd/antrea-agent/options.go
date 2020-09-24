@@ -42,9 +42,12 @@ const (
 	defaultFlowCollectorTransport  = "tcp"
 	defaultFlowCollectorPort       = "4739"
 	defaultFlowPollInterval        = 5 * time.Second
+	defaultFlowExportFrequency    = 12
 	defaultActiveFlowExportTimeout = 60 * time.Second
 	defaultIdleFlowExportTimeout   = 15 * time.Second
 	defaultNPLPortRange            = "40000-41000"
+	defaultNodePortVirtualIP      = "169.254.169.110"
+	defaultNodePortVirtualIPv6    = "fec0::ffee:ddcc:bbaa"
 )
 
 type Options struct {
@@ -62,10 +65,14 @@ type Options struct {
 	activeFlowTimeout time.Duration
 	// Idle flow timeout to export records of inactive flows
 	idleFlowTimeout time.Duration
+	// The virtual IP for NodePort Service support.
+	nodePortVirtualIP, nodePortVirtualIPv6 net.IP
 }
 
 func newOptions() *Options {
 	return &Options{
+		nodePortVirtualIP:   net.ParseIP(defaultNodePortVirtualIP),
+		nodePortVirtualIPv6: net.ParseIP(defaultNodePortVirtualIPv6),
 		config: &AgentConfig{
 			EnablePrometheusMetrics:   true,
 			EnableTLSToFlowAggregator: true,
@@ -147,6 +154,9 @@ func (o *Options) validate(args []string) error {
 		// (but SNAT can be done by the primary CNI).
 		o.config.NoSNAT = true
 	}
+	if err := o.validateAntreaProxyConfig(); err != nil {
+		return fmt.Errorf("proxy config is invalid: %w", err)
+	}
 	if err := o.validateFlowExporterConfig(); err != nil {
 		return fmt.Errorf("failed to validate flow exporter config: %v", err)
 	}
@@ -214,6 +224,17 @@ func (o *Options) setDefaults() {
 			o.config.NPLPortRange = defaultNPLPortRange
 		}
 	}
+}
+
+func (o *Options) validateAntreaProxyConfig() error {
+	if features.DefaultFeatureGate.Enabled(features.AntreaProxyNodePort) {
+		for _, nodePortAddress := range o.config.NodePortAddresses {
+			if _, _, err := net.ParseCIDR(nodePortAddress); err != nil {
+				return fmt.Errorf("NodePortAddress is not valid, can not parse `%s`: %w", nodePortAddress, err)
+			}
+		}
+	}
+	return nil
 }
 
 func (o *Options) validateFlowExporterConfig() error {
