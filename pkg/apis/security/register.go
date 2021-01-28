@@ -16,5 +16,5 @@ package security
 
 // GroupName is the group name used in this package
 const (
-	GroupName = "security.antrea.tanzu.vmware.com"
+	GroupName = "security.antrea.io"
 )

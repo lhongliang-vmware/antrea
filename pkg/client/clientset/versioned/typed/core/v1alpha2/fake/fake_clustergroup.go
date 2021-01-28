@@ -33,9 +33,9 @@ type FakeClusterGroups struct {
 	Fake *FakeCoreV1alpha2
 }
 
-var clustergroupsResource = schema.GroupVersionResource{Group: "core.antrea.tanzu.vmware.com", Version: "v1alpha2", Resource: "clustergroups"}
+var clustergroupsResource = schema.GroupVersionResource{Group: "core.antrea.io", Version: "v1alpha2", Resource: "clustergroups"}
 
-var clustergroupsKind = schema.GroupVersionKind{Group: "core.antrea.tanzu.vmware.com", Version: "v1alpha2", Kind: "ClusterGroup"}
+var clustergroupsKind = schema.GroupVersionKind{Group: "core.antrea.io", Version: "v1alpha2", Kind: "ClusterGroup"}
 
 // Get takes name of the clusterGroup, and returns the corresponding clusterGroup object, and an error if there is any.
 func (c *FakeClusterGroups) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha2.ClusterGroup, err error) {

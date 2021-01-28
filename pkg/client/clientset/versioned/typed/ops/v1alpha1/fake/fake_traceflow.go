@@ -1,4 +1,4 @@
-// Copyright 2020 Antrea Authors
+// Copyright 2021 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -33,9 +33,9 @@ type FakeTraceflows struct {
 	Fake *FakeOpsV1alpha1
 }
 
-var traceflowsResource = schema.GroupVersionResource{Group: "ops.antrea.tanzu.vmware.com", Version: "v1alpha1", Resource: "traceflows"}
+var traceflowsResource = schema.GroupVersionResource{Group: "ops.antrea.io", Version: "v1alpha1", Resource: "traceflows"}
 
-var traceflowsKind = schema.GroupVersionKind{Group: "ops.antrea.tanzu.vmware.com", Version: "v1alpha1", Kind: "Traceflow"}
+var traceflowsKind = schema.GroupVersionKind{Group: "ops.antrea.io", Version: "v1alpha1", Kind: "Traceflow"}
 
 // Get takes name of the traceflow, and returns the corresponding traceflow object, and an error if there is any.
 func (c *FakeTraceflows) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha1.Traceflow, err error) {

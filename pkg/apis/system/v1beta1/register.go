@@ -22,7 +22,7 @@ import (
 	clusterinfo "github.com/vmware-tanzu/antrea/pkg/apis/clusterinformation/v1beta1"
 )
 
-const GroupName = "system.antrea.tanzu.vmware.com"
+const GroupName = "system.antrea.io"
 
 var (
 	SchemeGroupVersion = schema.GroupVersion{

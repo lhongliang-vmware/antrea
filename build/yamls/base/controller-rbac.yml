@@ -93,6 +93,9 @@ rules:
       - v1beta2.controlplane.antrea.tanzu.vmware.com
       - v1beta1.controlplane.antrea.tanzu.vmware.com
       - v1beta1.networking.antrea.tanzu.vmware.com
+      - v1alpha1.stats.antrea.io
+      - v1beta1.system.antrea.io
+      - v1beta2.controlplane.antrea.io
     verbs:
       - get
       - update
@@ -105,9 +108,74 @@ rules:
       - crdmutator.antrea.tanzu.vmware.com
       - crdvalidator.antrea.tanzu.vmware.com
       - labelsmutator.antrea.io
+      - crdmutator.antrea.io
+      - crdvalidator.antrea.io
     verbs:
       - get
       - update
+  - apiGroups:
+      - security.antrea.io
+    resources:
+      - clusternetworkpolicies
+      - networkpolicies
+    verbs:
+      - get
+      - watch
+      - list
+      - update
+      - patch
+      - create
+      - delete
+  - apiGroups:
+      - security.antrea.io
+    resources:
+      - clusternetworkpolicies/status
+      - networkpolicies/status
+    verbs:
+      - update
+  - apiGroups:
+      - security.antrea.io
+    resources:
+      - tiers
+    verbs:
+      - get
+      - watch
+      - list
+      - create
+      - update
+  - apiGroups:
+      - ops.antrea.io
+    resources:
+      - traceflows
+      - traceflows/status
+    verbs:
+      - get
+      - watch
+      - list
+      - update
+      - patch
+      - create
+      - delete
+  - apiGroups:
+      - core.antrea.io
+    resources:
+      - externalentities
+      - clustergroups
+    verbs:
+      - get
+      - watch
+      - list
+      - update
+      - patch
+      - create
+      - delete
+  - apiGroups:
+      - core.antrea.io
+    resources:
+      - clustergroups/status
+    verbs:
+      - update
+# Deprecated in v0.14, planned for removal in v0.16.
   - apiGroups:
       - security.antrea.tanzu.vmware.com
     resources:
@@ -117,6 +185,10 @@ rules:
       - get
       - watch
       - list
+      - update
+      - patch
+      - create
+      - delete
   - apiGroups:
       - security.antrea.tanzu.vmware.com
     resources:
@@ -148,7 +220,7 @@ rules:
       - create
       - delete
   - apiGroups:
-    - core.antrea.tanzu.vmware.com
+      - core.antrea.tanzu.vmware.com
     resources:
       - externalentities
       - clustergroups
@@ -157,7 +229,7 @@ rules:
       - watch
       - list
   - apiGroups:
-    - core.antrea.tanzu.vmware.com
+      - core.antrea.tanzu.vmware.com
     resources:
       - clustergroups/status
     verbs:

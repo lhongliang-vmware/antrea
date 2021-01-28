@@ -21,7 +21,7 @@ import (
 )
 
 var SchemeGroupVersion = schema.GroupVersion{
-	Group:   "ops.antrea.tanzu.vmware.com",
+	Group:   "ops.antrea.io",
 	Version: "v1alpha1",
 }
 

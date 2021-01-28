@@ -13,6 +13,6 @@
 // limitations under the License.
 
 // +k8s:deepcopy-gen=package
-// +groupName=core.antrea.tanzu.vmware.com
+// +groupName=core.antrea.io
 
 package core

@@ -1,4 +1,4 @@
-// Copyright 2020 Antrea Authors
+// Copyright 2021 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ type OpsV1alpha1Interface interface {
 	TraceflowsGetter
 }
 
-// OpsV1alpha1Client is used to interact with features provided by the ops.antrea.tanzu.vmware.com group.
+// OpsV1alpha1Client is used to interact with features provided by the ops.antrea.io group.
 type OpsV1alpha1Client struct {
 	restClient rest.Interface
 }

@@ -16,5 +16,5 @@ package core
 
 // GroupName is the group name used in this package
 const (
-	GroupName = "core.antrea.tanzu.vmware.com"
+	GroupName = "core.antrea.io"
 )

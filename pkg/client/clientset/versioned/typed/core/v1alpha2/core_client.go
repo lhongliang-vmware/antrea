@@ -1,4 +1,4 @@
-// Copyright 2020 Antrea Authors
+// Copyright 2021 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ type CoreV1alpha2Interface interface {
 	ExternalEntitiesGetter
 }
 
-// CoreV1alpha2Client is used to interact with features provided by the core.antrea.tanzu.vmware.com group.
+// CoreV1alpha2Client is used to interact with features provided by the core.antrea.io group.
 type CoreV1alpha2Client struct {
 	restClient rest.Interface
 }

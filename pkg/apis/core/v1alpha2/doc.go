@@ -14,6 +14,6 @@
 
 // +k8s:openapi-gen=true
 // +k8s:deepcopy-gen=package
-// +groupName=core.antrea.tanzu.vmware.com
+// +groupName=core.antrea.io
 
 package v1alpha2 // import "github.com/vmware-tanzu/antrea/pkg/apis/core/v1alpha2"

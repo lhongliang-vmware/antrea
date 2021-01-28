@@ -1,4 +1,4 @@
-// Copyright 2020 Antrea Authors
+// Copyright 2021 Antrea Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,9 +34,9 @@ type FakeExternalEntities struct {
 	ns   string
 }
 
-var externalentitiesResource = schema.GroupVersionResource{Group: "core.antrea.tanzu.vmware.com", Version: "v1alpha2", Resource: "externalentities"}
+var externalentitiesResource = schema.GroupVersionResource{Group: "core.antrea.io", Version: "v1alpha2", Resource: "externalentities"}
 
-var externalentitiesKind = schema.GroupVersionKind{Group: "core.antrea.tanzu.vmware.com", Version: "v1alpha2", Kind: "ExternalEntity"}
+var externalentitiesKind = schema.GroupVersionKind{Group: "core.antrea.io", Version: "v1alpha2", Kind: "ExternalEntity"}
 
 // Get takes name of the externalEntity, and returns the corresponding externalEntity object, and an error if there is any.
 func (c *FakeExternalEntities) Get(ctx context.Context, name string, options v1.GetOptions) (result *v1alpha2.ExternalEntity, err error) {
