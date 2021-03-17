@@ -1091,7 +1091,7 @@ spec:
     kind: Tier
     plural: tiers
     shortNames:
-    - ltr
+    - ltier
     singular: tier
   scope: Cluster
   versions:

@@ -56,6 +56,9 @@ func (n *ExternalEntityHandler) getNew(namespace, name string) (*core.ExternalEn
 	lister := n.lister.ExternalEntities(namespace)
 	ee, err := lister.Get(name)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to get new %s %s/%s from lister: %v", n.CRDName, namespace, name, err)
 	}
 	return ee, nil
@@ -101,6 +104,9 @@ func (n *ExternalEntityHandler) getLegacy(namespace, name string) (*legacycore.E
 	lister := n.legacyLister.ExternalEntities(namespace)
 	ee, err := lister.Get(name)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to get legacy %s %s/%s from listers: %v", n.CRDName, namespace, name, err)
 	}
 	return ee, nil
@@ -181,6 +187,11 @@ func (n *ExternalEntityHandler) MirroringADD(namespace, name string) error {
 
 	// Update the mirroring status of legacy ExternalEntity by setting annotation.
 	// Add a key-value "mirroringStatus/mirrored" to annotation.
+	// We need to get the latest legacy CRD as the mirroring new CRD may update the legacy CRD.
+	lee, err = n.getLegacy(namespace, name)
+	if err != nil {
+		return err
+	}
 	setMirroringStatus(lee, mirrored)
 	err = n.updateLegacy(lee)
 	if err != nil {
@@ -268,27 +279,29 @@ func (n *ExternalEntityHandler) MirroringDELETE(target TARGET, namespace, name s
 func (n *ExternalEntityHandler) MirroringCHECK(target TARGET, namespace, name string) error {
 	if target == new {
 		// Get the legacy ExternalEntity
-		_, err := n.getLegacy(namespace, name)
+		_, err := n.getNew(namespace, name)
 		if err != nil {
-			// If it is not found, delete the new ExternalEntity as the legacy ExternalEntity that mirroring the new ExternalEntity has been deleted.
+			// If new is not found, delete the legacy as it is orphan.
 			if apierrors.IsNotFound(err) {
-				err = n.MirroringDELETE(new, namespace, name)
+				err = n.MirroringDELETE(legacy, namespace, name)
 				if err != nil {
 					return err
 				}
+				klog.Infof("Found orphan legacy %s %s/%s and deleted it", n.CRDName, namespace, name)
 			} else {
 				return fmt.Errorf("failed to check mirroring %s %s/%s: %v", n.CRDName, namespace, name, err)
 			}
 		}
 	} else if target == legacy {
 		// Get the new ExternalEntity
-		_, err := n.getNew(namespace, name)
+		_, err := n.getLegacy(namespace, name)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				err = n.MirroringDELETE(legacy, namespace, name)
+				err = n.MirroringDELETE(new, namespace, name)
 				if err != nil {
 					return err
 				}
+				klog.Infof("Found orphan new %s %s/%s and deleted it", n.CRDName, namespace, name)
 			} else {
 				return fmt.Errorf("failed to check legacy %s %s/%s: %v", n.CRDName, namespace, name, err)
 			}

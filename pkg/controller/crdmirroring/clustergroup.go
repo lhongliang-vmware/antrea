@@ -54,11 +54,15 @@ func NewClusterGroupHandler(c *Controller) MirroringHandler {
 
 func (n *ClusterGroupHandler) getNew(namespace, name string) (*core.ClusterGroup, error) {
 	lister := n.lister
-	np, err := lister.Get(name)
+	cg, err := lister.Get(name)
 	if err != nil {
+		//TODO: use a function here
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to get new %s %s/%s from lister: %v", n.CRDName, namespace, name, err)
 	}
-	return np, nil
+	return cg, nil
 }
 
 func (n *ClusterGroupHandler) createNew(cg *core.ClusterGroup) error {
@@ -99,7 +103,7 @@ func (n *ClusterGroupHandler) updateStatusNew(cg *core.ClusterGroup) error {
 }
 
 func (n *ClusterGroupHandler) deleteNew(cg *core.ClusterGroup) error {
-	client := n.client.SecurityV1alpha1().ClusterNetworkPolicies()
+	client := n.client.CoreV1alpha2().ClusterGroups()
 	err := client.Delete(context.TODO(), cg.Name, metav1.DeleteOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to delete new %s %s/%s: %v", n.CRDName, cg.Namespace, cg.Name, err)
@@ -111,6 +115,9 @@ func (n *ClusterGroupHandler) getLegacy(namespace, name string) (*legacycore.Clu
 	lister := n.legacyLister
 	np, err := lister.Get(name)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to get legacy %s %s/%s from listers: %v", n.CRDName, namespace, name, err)
 	}
 	return np, nil
@@ -134,11 +141,11 @@ func (n *ClusterGroupHandler) updateStatusLegacy(lcg *legacycore.ClusterGroup) e
 	return nil
 }
 
-func (n *ClusterGroupHandler) deleteLegacy(lcg *legacycore.ClusterGroup) error {
-	client := n.legacyClient.SecurityV1alpha1().ClusterNetworkPolicies()
-	err := client.Delete(context.TODO(), lcg.Name, metav1.DeleteOptions{})
+func (n *ClusterGroupHandler) deleteLegacy(namespace, name string) error {
+	client := n.legacyClient.CoreV1alpha2().ClusterGroups()
+	err := client.Delete(context.TODO(), name, metav1.DeleteOptions{})
 	if err != nil {
-		return fmt.Errorf("failed to delete legacy %s %s/%s: %v", n.CRDName, lcg.Namespace, lcg.Name, err)
+		return fmt.Errorf("failed to delete legacy %s %s/%s: %v", n.CRDName, namespace, name, err)
 	}
 	return nil
 }
@@ -204,21 +211,26 @@ func (n *ClusterGroupHandler) syncStatus(target TARGET, lcg *legacycore.ClusterG
 
 func (n *ClusterGroupHandler) MirroringADD(namespace, name string) error {
 	// Get the legacy ClusterGroup
-	lnp, err := n.getLegacy(namespace, name)
+	lcg, err := n.getLegacy(namespace, name)
 	if err != nil {
 		return err
 	}
 
 	// Create a mirroring new ClusterGroup
-	err = n.createNew(n.buildNew(lnp))
+	err = n.createNew(n.buildNew(lcg))
 	if err != nil {
 		return err
 	}
 
 	// Update the mirroring status of legacy ClusterGroup by setting annotation.
 	// Add a key-value "mirroringStatus/mirrored" to annotation.
-	setMirroringStatus(lnp, mirrored)
-	err = n.updateLegacy(lnp)
+	// We need to get the latest legacy CRD as the mirroring new CRD may update the legacy CRD.
+	lcg, err = n.getLegacy(namespace, name)
+	if err != nil {
+		return err
+	}
+	setMirroringStatus(lcg, mirrored)
+	err = n.updateLegacy(lcg)
 	if err != nil {
 		return err
 	}
@@ -227,11 +239,11 @@ func (n *ClusterGroupHandler) MirroringADD(namespace, name string) error {
 
 func (n *ClusterGroupHandler) MirroringUPDATE(target TARGET, namespace, name string) error {
 	// Get the legacy ClusterGroup and the mirroring new ClusterGroup.
-	lnp, err := n.getLegacy(namespace, name)
+	lcg, err := n.getLegacy(namespace, name)
 	if err != nil {
 		return err
 	}
-	np, err := n.getNew(namespace, name)
+	cg, err := n.getNew(namespace, name)
 	if err != nil {
 		return err
 	}
@@ -241,26 +253,26 @@ func (n *ClusterGroupHandler) MirroringUPDATE(target TARGET, namespace, name str
 	// However, util the annotation of "managedBy":"crdmirroring-controller" is removed, the key of UPDATE event is not
 	// processed by worker function. Since the annotation of "managedBy":"crdmirroring-controller is  removed, the
 	// mirroring new ClusterGroup should not be synchronized with legacy ClusterGroup.
-	if !managedByMirroringController(np, n.CRDName) {
+	if !managedByMirroringController(cg, n.CRDName) {
 		return nil
 	}
 
 	// If Spec, Labels, Status of the legacy and the mirroring new ClusterGroup deep equals, stop updating.
 	// This is used for stopping cycle updating between the legacy and the mirroring new ClusterGroup.
-	specAndLabels, status := n.deepEqualClusterGroup(lnp, np, namespace, name)
+	specAndLabels, status := n.deepEqualClusterGroup(lcg, cg, namespace, name)
 	if specAndLabels && status {
 		return nil
 	}
 
-	n.syncData(target, lnp, np)
+	n.syncData(target, lcg, cg)
 	if !specAndLabels {
-		err = n.syncSpecAndLabels(target, lnp, np)
+		err = n.syncSpecAndLabels(target, lcg, cg)
 		if err != nil {
 			return err
 		}
 	}
 	if !status {
-		err = n.syncStatus(target, lnp, np)
+		err = n.syncStatus(target, lcg, cg)
 		if err != nil {
 			return err
 		}
@@ -270,35 +282,33 @@ func (n *ClusterGroupHandler) MirroringUPDATE(target TARGET, namespace, name str
 
 func (n *ClusterGroupHandler) MirroringDELETE(target TARGET, namespace, name string) error {
 	if target == new {
-		np, err := n.getNew(namespace, name)
+		cg, err := n.getNew(namespace, name)
 		if err != nil {
 			// If the target ClusterGroup we want to delete is not found, just return nil.
 			if apierrors.IsNotFound(err) {
 				return nil
-			} else {
-				return err
 			}
+			return err
 		}
-		if !managedByMirroringController(np, n.CRDName) {
+		if !managedByMirroringController(cg, n.CRDName) {
 			return nil
 		}
 
-		err = n.deleteNew(np)
+		err = n.deleteNew(cg)
 		if err != nil {
 			return err
 		}
 	} else if target == legacy {
-		lnp, err := n.getLegacy(namespace, name)
+		_, err := n.getLegacy(namespace, name)
 		if err != nil {
 			// If the target ClusterGroup we want to delete is not found, just return nil.
 			if apierrors.IsNotFound(err) {
 				return nil
-			} else {
-				return err
 			}
+			return err
 		}
 
-		err = n.deleteLegacy(lnp)
+		err = n.deleteLegacy(namespace, name)
 		if err != nil {
 			return err
 		}
@@ -310,27 +320,29 @@ func (n *ClusterGroupHandler) MirroringDELETE(target TARGET, namespace, name str
 func (n *ClusterGroupHandler) MirroringCHECK(target TARGET, namespace, name string) error {
 	if target == new {
 		// Get the legacy ClusterGroup
-		_, err := n.getLegacy(namespace, name)
+		_, err := n.getNew(namespace, name)
 		if err != nil {
-			// If it is not found, delete the new ClusterGroup as the legacy ClusterGroup that mirroring the new ClusterGroup has been deleted.
+			// If new is not found, delete the legacy as it is orphan.
 			if apierrors.IsNotFound(err) {
-				err = n.MirroringDELETE(new, namespace, name)
+				err = n.MirroringDELETE(legacy, namespace, name)
 				if err != nil {
 					return err
 				}
+				klog.Infof("Found orphan legacy %s %s/%s and deleted it", n.CRDName, namespace, name)
 			} else {
 				return fmt.Errorf("failed to check mirroring %s %s/%s: %v", n.CRDName, namespace, name, err)
 			}
 		}
 	} else if target == legacy {
 		// Get the new ClusterGroup
-		_, err := n.getNew(namespace, name)
+		_, err := n.getLegacy(namespace, name)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				err = n.MirroringDELETE(legacy, namespace, name)
+				err = n.MirroringDELETE(new, namespace, name)
 				if err != nil {
 					return err
 				}
+				klog.Infof("Found orphan new %s %s/%s and deleted it", n.CRDName, namespace, name)
 			} else {
 				return fmt.Errorf("failed to check legacy %s %s/%s: %v", n.CRDName, namespace, name, err)
 			}

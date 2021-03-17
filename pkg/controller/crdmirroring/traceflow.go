@@ -54,11 +54,14 @@ func NewTraceflowHandler(c *Controller) MirroringHandler {
 
 func (n *TraceflowHandler) getNew(namespace, name string) (*ops.Traceflow, error) {
 	lister := n.lister
-	np, err := lister.Get(name)
+	tf, err := lister.Get(name)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to get new %s %s/%s from lister: %v", n.CRDName, namespace, name, err)
 	}
-	return np, nil
+	return tf, nil
 }
 
 func (n *TraceflowHandler) createNew(tf *ops.Traceflow) error {
@@ -109,11 +112,14 @@ func (n *TraceflowHandler) deleteNew(tf *ops.Traceflow) error {
 
 func (n *TraceflowHandler) getLegacy(namespace, name string) (*legacyops.Traceflow, error) {
 	lister := n.legacyLister
-	np, err := lister.Get(name)
+	tf, err := lister.Get(name)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to get legacy %s %s/%s from listers: %v", n.CRDName, namespace, name, err)
 	}
-	return np, nil
+	return tf, nil
 }
 
 func (n *TraceflowHandler) updateLegacy(ltf *legacyops.Traceflow) error {
@@ -204,21 +210,26 @@ func (n *TraceflowHandler) syncStatus(target TARGET, ltf *legacyops.Traceflow, t
 
 func (n *TraceflowHandler) MirroringADD(namespace, name string) error {
 	// Get the legacy Traceflow
-	lnp, err := n.getLegacy(namespace, name)
+	ltf, err := n.getLegacy(namespace, name)
 	if err != nil {
 		return err
 	}
 
 	// Create a mirroring new Traceflow
-	err = n.createNew(n.buildNew(lnp))
+	err = n.createNew(n.buildNew(ltf))
 	if err != nil {
 		return err
 	}
 
 	// Update the mirroring status of legacy Traceflow by setting annotation.
 	// Add a key-value "mirroringStatus/mirrored" to annotation.
-	setMirroringStatus(lnp, mirrored)
-	err = n.updateLegacy(lnp)
+	// We need to get the latest legacy CRD as the mirroring new CRD may update the legacy CRD.
+	ltf, err = n.getLegacy(namespace, name)
+	if err != nil {
+		return err
+	}
+	setMirroringStatus(ltf, mirrored)
+	err = n.updateLegacy(ltf)
 	if err != nil {
 		return err
 	}
@@ -227,11 +238,11 @@ func (n *TraceflowHandler) MirroringADD(namespace, name string) error {
 
 func (n *TraceflowHandler) MirroringUPDATE(target TARGET, namespace, name string) error {
 	// Get the legacy Traceflow and the mirroring new Traceflow.
-	lnp, err := n.getLegacy(namespace, name)
+	ltf, err := n.getLegacy(namespace, name)
 	if err != nil {
 		return err
 	}
-	np, err := n.getNew(namespace, name)
+	tf, err := n.getNew(namespace, name)
 	if err != nil {
 		return err
 	}
@@ -241,26 +252,26 @@ func (n *TraceflowHandler) MirroringUPDATE(target TARGET, namespace, name string
 	// However, util the annotation of "managedBy":"crdmirroring-controller" is removed, the key of UPDATE event is not
 	// processed by worker function. Since the annotation of "managedBy":"crdmirroring-controller is  removed, the
 	// mirroring new Traceflow should not be synchronized with legacy Traceflow.
-	if !managedByMirroringController(np, n.CRDName) {
+	if !managedByMirroringController(tf, n.CRDName) {
 		return nil
 	}
 
 	// If Spec, Labels, Status of the legacy and the mirroring new Traceflow deep equals, stop updating.
 	// This is used for stopping cycle updating between the legacy and the mirroring new Traceflow.
-	specAndLabels, status := n.deepEqualTraceflow(lnp, np, namespace, name)
+	specAndLabels, status := n.deepEqualTraceflow(ltf, tf, namespace, name)
 	if specAndLabels && status {
 		return nil
 	}
 
-	n.syncData(target, lnp, np)
+	n.syncData(target, ltf, tf)
 	if !specAndLabels {
-		err = n.syncSpecAndLabels(target, lnp, np)
+		err = n.syncSpecAndLabels(target, ltf, tf)
 		if err != nil {
 			return err
 		}
 	}
 	if !status {
-		err = n.syncStatus(target, lnp, np)
+		err = n.syncStatus(target, ltf, tf)
 		if err != nil {
 			return err
 		}
@@ -270,7 +281,7 @@ func (n *TraceflowHandler) MirroringUPDATE(target TARGET, namespace, name string
 
 func (n *TraceflowHandler) MirroringDELETE(target TARGET, namespace, name string) error {
 	if target == new {
-		np, err := n.getNew(namespace, name)
+		tf, err := n.getNew(namespace, name)
 		if err != nil {
 			// If the target Traceflow we want to delete is not found, just return nil.
 			if apierrors.IsNotFound(err) {
@@ -279,11 +290,11 @@ func (n *TraceflowHandler) MirroringDELETE(target TARGET, namespace, name string
 				return err
 			}
 		}
-		if !managedByMirroringController(np, n.CRDName) {
+		if !managedByMirroringController(tf, n.CRDName) {
 			return nil
 		}
 
-		err = n.deleteNew(np)
+		err = n.deleteNew(tf)
 		if err != nil {
 			return err
 		}
@@ -310,27 +321,29 @@ func (n *TraceflowHandler) MirroringDELETE(target TARGET, namespace, name string
 func (n *TraceflowHandler) MirroringCHECK(target TARGET, namespace, name string) error {
 	if target == new {
 		// Get the legacy Traceflow
-		_, err := n.getLegacy(namespace, name)
+		_, err := n.getNew(namespace, name)
 		if err != nil {
 			// If it is not found, delete the new Traceflow as the legacy Traceflow that mirroring the new Traceflow has been deleted.
 			if apierrors.IsNotFound(err) {
-				err = n.MirroringDELETE(new, namespace, name)
+				err = n.MirroringDELETE(legacy, namespace, name)
 				if err != nil {
 					return err
 				}
+				klog.Infof("Found orphan legacy %s %s/%s and deleted it", n.CRDName, namespace, name)
 			} else {
 				return fmt.Errorf("failed to check mirroring %s %s/%s: %v", n.CRDName, namespace, name, err)
 			}
 		}
 	} else if target == legacy {
 		// Get the new Traceflow
-		_, err := n.getNew(namespace, name)
+		_, err := n.getLegacy(namespace, name)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				err = n.MirroringDELETE(legacy, namespace, name)
+				err = n.MirroringDELETE(new, namespace, name)
 				if err != nil {
 					return err
 				}
+				klog.Infof("Found orphan new %s %s/%s and deleted it", n.CRDName, namespace, name)
 			} else {
 				return fmt.Errorf("failed to check legacy %s %s/%s: %v", n.CRDName, namespace, name, err)
 			}

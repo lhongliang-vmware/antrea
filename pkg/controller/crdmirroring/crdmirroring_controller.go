@@ -181,6 +181,7 @@ func (c *Controller) syncCRD(key string) error {
 		c.queue.Forget(key)
 		return nil
 	}
+	klog.V(4).Infof("Process %s/%s ACTION: %v TARGET: %v", namespace, name, action, target)
 
 	switch action {
 	case ADD:

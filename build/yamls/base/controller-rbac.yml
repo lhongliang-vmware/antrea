@@ -204,8 +204,10 @@ rules:
       - get
       - watch
       - list
-      - create
       - update
+      - patch
+      - create
+      - delete
   - apiGroups:
       - ops.antrea.tanzu.vmware.com
     resources:
@@ -228,6 +230,10 @@ rules:
       - get
       - watch
       - list
+      - update
+      - patch
+      - create
+      - delete
   - apiGroups:
       - core.antrea.tanzu.vmware.com
     resources:

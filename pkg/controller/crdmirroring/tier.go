@@ -56,6 +56,9 @@ func (n *TierHandler) getNew(namespace, name string) (*security.Tier, error) {
 	lister := n.lister
 	tier, err := lister.Get(name)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to get new %s %s/%s from lister: %v", n.CRDName, namespace, name, err)
 	}
 	return tier, nil
@@ -101,6 +104,9 @@ func (n *TierHandler) getLegacy(namespace, name string) (*legacysecurity.Tier, e
 	lister := n.legacyLister
 	tier, err := lister.Get(name)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to get legacy %s %s/%s from listers: %v", n.CRDName, namespace, name, err)
 	}
 	return tier, nil
@@ -181,6 +187,11 @@ func (n *TierHandler) MirroringADD(namespace, name string) error {
 
 	// Update the mirroring status of legacy Tier by setting annotation.
 	// Add a key-value "mirroringStatus/mirrored" to annotation.
+	// We need to get the latest legacy CRD as the mirroring new CRD may update the legacy CRD.
+	ltier, err = n.getLegacy(namespace, name)
+	if err != nil {
+		return err
+	}
 	setMirroringStatus(ltier, mirrored)
 	err = n.updateLegacy(ltier)
 	if err != nil {
@@ -268,27 +279,29 @@ func (n *TierHandler) MirroringDELETE(target TARGET, namespace, name string) err
 func (n *TierHandler) MirroringCHECK(target TARGET, namespace, name string) error {
 	if target == new {
 		// Get the legacy Tier
-		_, err := n.getLegacy(namespace, name)
+		_, err := n.getNew(namespace, name)
 		if err != nil {
 			// If it is not found, delete the new Tier as the legacy Tier that mirroring the new Tier has been deleted.
 			if apierrors.IsNotFound(err) {
-				err = n.MirroringDELETE(new, namespace, name)
+				err = n.MirroringDELETE(legacy, namespace, name)
 				if err != nil {
 					return err
 				}
+				klog.Infof("Found orphan legacy %s %s/%s and deleted it", n.CRDName, namespace, name)
 			} else {
 				return fmt.Errorf("failed to check mirroring %s %s/%s: %v", n.CRDName, namespace, name, err)
 			}
 		}
 	} else if target == legacy {
 		// Get the new Tier
-		_, err := n.getNew(namespace, name)
+		_, err := n.getLegacy(namespace, name)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				err = n.MirroringDELETE(legacy, namespace, name)
+				err = n.MirroringDELETE(new, namespace, name)
 				if err != nil {
 					return err
 				}
+				klog.Infof("Found orphan new %s %s/%s and deleted it", n.CRDName, namespace, name)
 			} else {
 				return fmt.Errorf("failed to check legacy %s %s/%s: %v", n.CRDName, namespace, name, err)
 			}

@@ -52,7 +52,7 @@ func (c *Controller) onNewCRDAdd(obj interface{}) {
 	// Check if the legacy CRD mirroring current CRD exists.
 	if CRD.GetAnnotations()[managedBy] == controllerName {
 		klog.Infof("Processing mirroring %s %s/%s CHECK event", c.CRDName, CRD.GetNamespace(), CRD.GetName())
-		c.queueMirroringInfo(obj, CHECK, new)
+		c.queueMirroringInfo(obj, CHECK, legacy)
 	}
 }
 
@@ -141,7 +141,7 @@ func (c *Controller) onLegacyCRDAdd(obj interface{}) {
 
 	if legacyCRD.GetAnnotations()[mirroringStatus] == mirrored {
 		klog.Infof("Processing legacy %s %s/%s CHECK event", c.CRDName, legacyCRD.GetNamespace(), legacyCRD.GetName())
-		c.queueMirroringInfo(obj, CHECK, legacy)
+		c.queueMirroringInfo(obj, CHECK, new)
 		return
 	}
 
@@ -198,7 +198,7 @@ func (c *Controller) onLegacyCRDDelete(obj interface{}) {
 		legacyCRD = getLegacyCRDFromDeleteAction(obj).(*legacyops.Traceflow)
 	}
 	if legacyCRD == nil {
-		utilruntime.HandleError(fmt.Errorf("onLegacyCRDAdd() got unexpected type: %T", obj))
+		utilruntime.HandleError(fmt.Errorf("onLegacyCRDDelete() got unexpected type: %T", obj))
 		return
 	}
 

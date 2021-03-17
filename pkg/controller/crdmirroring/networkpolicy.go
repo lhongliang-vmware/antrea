@@ -56,6 +56,9 @@ func (n *NetworkPolicyHandler) getNew(namespace, name string) (*security.Network
 	lister := n.lister.NetworkPolicies(namespace)
 	np, err := lister.Get(name)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to get new %s %s/%s from lister: %v", n.CRDName, namespace, name, err)
 	}
 	return np, nil
@@ -111,6 +114,9 @@ func (n *NetworkPolicyHandler) getLegacy(namespace, name string) (*legacysecurit
 	lister := n.legacyLister.NetworkPolicies(namespace)
 	np, err := lister.Get(name)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to get legacy %s %s/%s from listers: %v", n.CRDName, namespace, name, err)
 	}
 	return np, nil
@@ -217,6 +223,11 @@ func (n *NetworkPolicyHandler) MirroringADD(namespace, name string) error {
 
 	// Update the mirroring status of legacy NetworkPolicy by setting annotation.
 	// Add a key-value "mirroringStatus/mirrored" to annotation.
+	// We need to get the latest legacy CRD as the mirroring new CRD may update the legacy CRD.
+	lnp, err = n.getLegacy(namespace, name)
+	if err != nil {
+		return err
+	}
 	setMirroringStatus(lnp, mirrored)
 	err = n.updateLegacy(lnp)
 	if err != nil {
@@ -310,27 +321,29 @@ func (n *NetworkPolicyHandler) MirroringDELETE(target TARGET, namespace, name st
 func (n *NetworkPolicyHandler) MirroringCHECK(target TARGET, namespace, name string) error {
 	if target == new {
 		// Get the legacy NetworkPolicy
-		_, err := n.getLegacy(namespace, name)
+		_, err := n.getNew(namespace, name)
 		if err != nil {
 			// If it is not found, delete the new NetworkPolicy as the legacy NetworkPolicy that mirroring the new NetworkPolicy has been deleted.
 			if apierrors.IsNotFound(err) {
-				err = n.MirroringDELETE(new, namespace, name)
+				err = n.MirroringDELETE(legacy, namespace, name)
 				if err != nil {
 					return err
 				}
+				klog.Infof("Found orphan legacy %s %s/%s and deleted it", n.CRDName, namespace, name)
 			} else {
 				return fmt.Errorf("failed to check mirroring %s %s/%s: %v", n.CRDName, namespace, name, err)
 			}
 		}
 	} else if target == legacy {
 		// Get the new NetworkPolicy
-		_, err := n.getNew(namespace, name)
+		_, err := n.getLegacy(namespace, name)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				err = n.MirroringDELETE(legacy, namespace, name)
+				err = n.MirroringDELETE(new, namespace, name)
 				if err != nil {
 					return err
 				}
+				klog.Infof("Found orphan new %s %s/%s and deleted it", n.CRDName, namespace, name)
 			} else {
 				return fmt.Errorf("failed to check legacy %s %s/%s: %v", n.CRDName, namespace, name, err)
 			}

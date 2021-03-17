@@ -54,11 +54,14 @@ func NewClusterNetworkPolicyHandler(c *Controller) MirroringHandler {
 
 func (n *ClusterNetworkPolicyHandler) getNew(namespace, name string) (*security.ClusterNetworkPolicy, error) {
 	lister := n.lister
-	np, err := lister.Get(name)
+	cnp, err := lister.Get(name)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to get new %s %s/%s from lister: %v", n.CRDName, namespace, name, err)
 	}
-	return np, nil
+	return cnp, nil
 }
 
 func (n *ClusterNetworkPolicyHandler) createNew(cnp *security.ClusterNetworkPolicy) error {
@@ -109,11 +112,14 @@ func (n *ClusterNetworkPolicyHandler) deleteNew(cnp *security.ClusterNetworkPoli
 
 func (n *ClusterNetworkPolicyHandler) getLegacy(namespace, name string) (*legacysecurity.ClusterNetworkPolicy, error) {
 	lister := n.legacyLister
-	np, err := lister.Get(name)
+	cnp, err := lister.Get(name)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to get legacy %s %s/%s from listers: %v", n.CRDName, namespace, name, err)
 	}
-	return np, nil
+	return cnp, nil
 }
 
 func (n *ClusterNetworkPolicyHandler) updateLegacy(lcnp *legacysecurity.ClusterNetworkPolicy) error {
@@ -204,21 +210,26 @@ func (n *ClusterNetworkPolicyHandler) syncStatus(target TARGET, lcnp *legacysecu
 
 func (n *ClusterNetworkPolicyHandler) MirroringADD(namespace, name string) error {
 	// Get the legacy ClusterNetworkPolicy
-	lnp, err := n.getLegacy(namespace, name)
+	lcnp, err := n.getLegacy(namespace, name)
 	if err != nil {
 		return err
 	}
 
 	// Create a mirroring new ClusterNetworkPolicy
-	err = n.createNew(n.buildNew(lnp))
+	err = n.createNew(n.buildNew(lcnp))
 	if err != nil {
 		return err
 	}
 
 	// Update the mirroring status of legacy ClusterNetworkPolicy by setting annotation.
 	// Add a key-value "mirroringStatus/mirrored" to annotation.
-	setMirroringStatus(lnp, mirrored)
-	err = n.updateLegacy(lnp)
+	// We need to get the latest legacy CRD as the mirroring new CRD may update the legacy CRD.
+	lcnp, err = n.getLegacy(namespace, name)
+	if err != nil {
+		return err
+	}
+	setMirroringStatus(lcnp, mirrored)
+	err = n.updateLegacy(lcnp)
 	if err != nil {
 		return err
 	}
@@ -227,11 +238,11 @@ func (n *ClusterNetworkPolicyHandler) MirroringADD(namespace, name string) error
 
 func (n *ClusterNetworkPolicyHandler) MirroringUPDATE(target TARGET, namespace, name string) error {
 	// Get the legacy ClusterNetworkPolicy and the mirroring new ClusterNetworkPolicy.
-	lnp, err := n.getLegacy(namespace, name)
+	lcnp, err := n.getLegacy(namespace, name)
 	if err != nil {
 		return err
 	}
-	np, err := n.getNew(namespace, name)
+	cnp, err := n.getNew(namespace, name)
 	if err != nil {
 		return err
 	}
@@ -241,26 +252,26 @@ func (n *ClusterNetworkPolicyHandler) MirroringUPDATE(target TARGET, namespace, 
 	// However, util the annotation of "managedBy":"crdmirroring-controller" is removed, the key of UPDATE event is not
 	// processed by worker function. Since the annotation of "managedBy":"crdmirroring-controller is  removed, the
 	// mirroring new ClusterNetworkPolicy should not be synchronized with legacy ClusterNetworkPolicy.
-	if !managedByMirroringController(np, n.CRDName) {
+	if !managedByMirroringController(cnp, n.CRDName) {
 		return nil
 	}
 
 	// If Spec, Labels, Status of the legacy and the mirroring new ClusterNetworkPolicy deep equals, stop updating.
 	// This is used for stopping cycle updating between the legacy and the mirroring new ClusterNetworkPolicy.
-	specAndLabels, status := n.deepEqualClusterNetworkPolicy(lnp, np, namespace, name)
+	specAndLabels, status := n.deepEqualClusterNetworkPolicy(lcnp, cnp, namespace, name)
 	if specAndLabels && status {
 		return nil
 	}
 
-	n.syncData(target, lnp, np)
+	n.syncData(target, lcnp, cnp)
 	if !specAndLabels {
-		err = n.syncSpecAndLabels(target, lnp, np)
+		err = n.syncSpecAndLabels(target, lcnp, cnp)
 		if err != nil {
 			return err
 		}
 	}
 	if !status {
-		err = n.syncStatus(target, lnp, np)
+		err = n.syncStatus(target, lcnp, cnp)
 		if err != nil {
 			return err
 		}
@@ -270,35 +281,33 @@ func (n *ClusterNetworkPolicyHandler) MirroringUPDATE(target TARGET, namespace, 
 
 func (n *ClusterNetworkPolicyHandler) MirroringDELETE(target TARGET, namespace, name string) error {
 	if target == new {
-		np, err := n.getNew(namespace, name)
+		cnp, err := n.getNew(namespace, name)
 		if err != nil {
 			// If the target ClusterNetworkPolicy we want to delete is not found, just return nil.
 			if apierrors.IsNotFound(err) {
 				return nil
-			} else {
-				return err
 			}
+			return err
 		}
-		if !managedByMirroringController(np, n.CRDName) {
+		if !managedByMirroringController(cnp, n.CRDName) {
 			return nil
 		}
 
-		err = n.deleteNew(np)
+		err = n.deleteNew(cnp)
 		if err != nil {
 			return err
 		}
 	} else if target == legacy {
-		lnp, err := n.getLegacy(namespace, name)
+		lcnp, err := n.getLegacy(namespace, name)
 		if err != nil {
 			// If the target ClusterNetworkPolicy we want to delete is not found, just return nil.
 			if apierrors.IsNotFound(err) {
 				return nil
-			} else {
-				return err
 			}
+			return err
 		}
 
-		err = n.deleteLegacy(lnp)
+		err = n.deleteLegacy(lcnp)
 		if err != nil {
 			return err
 		}
@@ -310,27 +319,29 @@ func (n *ClusterNetworkPolicyHandler) MirroringDELETE(target TARGET, namespace, 
 func (n *ClusterNetworkPolicyHandler) MirroringCHECK(target TARGET, namespace, name string) error {
 	if target == new {
 		// Get the legacy ClusterNetworkPolicy
-		_, err := n.getLegacy(namespace, name)
+		_, err := n.getNew(namespace, name)
 		if err != nil {
-			// If it is not found, delete the new ClusterNetworkPolicy as the legacy ClusterNetworkPolicy that mirroring the new ClusterNetworkPolicy has been deleted.
+			// If new is not found, delete the legacy as it is orphan.
 			if apierrors.IsNotFound(err) {
-				err = n.MirroringDELETE(new, namespace, name)
+				err = n.MirroringDELETE(legacy, namespace, name)
 				if err != nil {
 					return err
 				}
+				klog.Infof("Found orphan legacy %s %s/%s and deleted it", n.CRDName, namespace, name)
 			} else {
 				return fmt.Errorf("failed to check mirroring %s %s/%s: %v", n.CRDName, namespace, name, err)
 			}
 		}
 	} else if target == legacy {
 		// Get the new ClusterNetworkPolicy
-		_, err := n.getNew(namespace, name)
+		_, err := n.getLegacy(namespace, name)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				err = n.MirroringDELETE(legacy, namespace, name)
+				err = n.MirroringDELETE(new, namespace, name)
 				if err != nil {
 					return err
 				}
+				klog.Infof("Found orphan new %s %s/%s and deleted it", n.CRDName, namespace, name)
 			} else {
 				return fmt.Errorf("failed to check legacy %s %s/%s: %v", n.CRDName, namespace, name, err)
 			}
