@@ -68,6 +68,7 @@ type Initializer struct {
 	networkConfig   *config.NetworkConfig
 	nodeConfig      *config.NodeConfig
 	enableProxy     bool
+	enableNodePort  bool
 	// networkReadyCh should be closed once the Node's network is ready.
 	// The CNI server will wait for it before handling any CNI Add requests.
 	networkReadyCh chan<- struct{}

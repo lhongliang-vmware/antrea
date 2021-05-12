@@ -98,12 +98,22 @@ func run(o *Options) error {
 	ovsDatapathType := ovsconfig.OVSDatapathType(o.config.OVSDatapathType)
 	ovsBridgeClient := ovsconfig.NewOVSBridge(o.config.OVSBridge, ovsDatapathType, ovsdbConnection)
 	ovsBridgeMgmtAddr := ofconfig.GetMgmtAddress(o.config.OVSRunDir, o.config.OVSBridge)
+	var nodePortAddresses map[int][]net.IP
+	if features.DefaultFeatureGate.Enabled(features.AntreaProxyNodePort) {
+		nodePortAddresses, err = config.GetAvailableNodePortAddresses(o.config.NodePortAddresses)
+		if err != nil {
+			return fmt.Errorf("error getting NodePort addresses: %v", err)
+		}
+	}
+
 	ofClient := openflow.NewClient(o.config.OVSBridge, ovsBridgeMgmtAddr, ovsDatapathType,
 		o.nodePortVirtualIP,
 		o.nodePortVirtualIPv6,
+		nodePortAddresses,
 		features.DefaultFeatureGate.Enabled(features.AntreaProxy),
 		features.DefaultFeatureGate.Enabled(features.AntreaPolicy),
-		features.DefaultFeatureGate.Enabled(features.Egress))
+		features.DefaultFeatureGate.Enabled(features.Egress),
+		features.DefaultFeatureGate.Enabled(features.AntreaProxyNodePort))
 
 	_, serviceCIDRNet, _ := net.ParseCIDR(o.config.ServiceCIDR)
 	var serviceCIDRNetv6 *net.IPNet
@@ -118,7 +128,7 @@ func run(o *Options) error {
 		TrafficEncapMode:  encapMode,
 		EnableIPSecTunnel: o.config.EnableIPSecTunnel}
 
-	routeClient, err := route.NewClient(o.nodePortVirtualIP, o.nodePortVirtualIPv6, serviceCIDRNet, networkConfig, o.config.NoSNAT, features.DefaultFeatureGate.Enabled(features.AntreaProxyNodePort))
+	routeClient, err := route.NewClient(serviceCIDRNet, networkConfig, o.config.NoSNAT)
 	if err != nil {
 		return fmt.Errorf("error creating route client: %v", err)
 	}
@@ -209,14 +219,7 @@ func run(o *Options) error {
 	if features.DefaultFeatureGate.Enabled(features.AntreaProxy) {
 		v4Enabled := config.IsIPv4Enabled(nodeConfig, networkConfig.TrafficEncapMode)
 		v6Enabled := config.IsIPv6Enabled(nodeConfig, networkConfig.TrafficEncapMode)
-		var nodePortAddresses []*net.IPNet
-		nodePortSupport := features.DefaultFeatureGate.Enabled(features.AntreaProxyNodePort)
-		if nodePortSupport {
-			for _, nodePortAddress := range o.config.NodePortAddresses {
-				_, ipNet, _ := net.ParseCIDR(nodePortAddress)
-				nodePortAddresses = append(nodePortAddresses, ipNet)
-			}
-		}
+		nodePortEnabled := features.DefaultFeatureGate.Enabled(features.AntreaProxyNodePort)
 		var err error
 		switch {
 		case v4Enabled && v6Enabled:
@@ -224,32 +227,28 @@ func run(o *Options) error {
 				o.nodePortVirtualIPv6,
 				nodePortAddresses,
 				nodeConfig.Name,
-				nodeConfig.PodIPv4CIDR,
-				nodeConfig.PodIPv6CIDR,
 				informerFactory,
 				ofClient,
 				routeClient,
-				nodePortSupport)
+				nodePortEnabled)
 		case v4Enabled:
 			proxier = proxy.NewProxier(o.nodePortVirtualIP,
 				nodePortAddresses,
 				nodeConfig.Name,
-				nodeConfig.PodIPv4CIDR,
 				informerFactory,
 				ofClient,
 				routeClient,
 				v6Enabled,
-				nodePortSupport)
+				nodePortEnabled)
 		case v6Enabled:
 			proxier = proxy.NewProxier(o.nodePortVirtualIPv6,
 				nodePortAddresses,
 				nodeConfig.Name,
-				nodeConfig.PodIPv4CIDR,
 				informerFactory,
 				ofClient,
 				routeClient,
 				v6Enabled,
-				nodePortSupport)
+				nodePortEnabled)
 		default:
 			err = fmt.Errorf("at least one of IPv4 or IPv6 should be enabled")
 		}

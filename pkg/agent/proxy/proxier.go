@@ -48,7 +48,7 @@ const (
 	// Due to the maximum message size in Openflow 1.3 and the implementation of Services in Antrea, the maximum number
 	// of Endpoints that Antrea can support at the moment is 800. If the number of Endpoints for a given Service exceeds
 	// 800, extra Endpoints will be dropped.
-	maxEndpoints = 800
+	maxEndpoints       = 800
 	nodePortLocalLabel = "NodePortLocal"
 )
 
@@ -103,15 +103,15 @@ type proxier struct {
 	// oversizeServiceSet records the Services that have more than 800 Endpoints.
 	oversizeServiceSet sets.String
 
-	runner              *k8sproxy.BoundedFrequencyRunner
-	stopChan            <-chan struct{}
-	ofClient            openflow.Client
-	routeClient         route.Interface
-	nodeIPs             []net.IP
-	virtualNodePortIP   net.IP
-	isIPv6              bool
-	nodePortSupport     bool
-	enableEndpointSlice bool
+	runner               *k8sproxy.BoundedFrequencyRunner
+	stopChan             <-chan struct{}
+	ofClient             openflow.Client
+	routeClient          route.Interface
+	nodePortAddresses    map[int][]net.IP
+	virtualNodePortIP    net.IP
+	isIPv6               bool
+	nodePortEnabled      bool
+	endpointSliceEnabled bool
 }
 
 func endpointKey(endpoint k8sproxy.Endpoint, protocol binding.Protocol) string {
@@ -153,7 +153,7 @@ func (p *proxier) removeStaleServices() {
 			klog.Errorf("Failed to remove flows of Service %v: %v", svcPortName, err)
 			continue
 		}
-		if p.nodePortSupport && svcInfo.NodePort() > 0 {
+		if p.nodePortEnabled && svcInfo.NodePort() > 0 {
 			if svcInfo.OnlyNodeLocalEndpoints() {
 				nGroupID, _ := p.groupCounter.Get(svcPortName, nodePortLocalLabel)
 				if err := p.ofClient.UninstallServiceGroup(nGroupID); err != nil {
@@ -162,11 +162,20 @@ func (p *proxier) removeStaleServices() {
 				}
 				p.groupCounter.Recycle(svcPortName, nodePortLocalLabel)
 			}
-			if err := p.ofClient.UninstallServiceFlows(p.virtualNodePortIP, uint16(svcInfo.NodePort()), svcInfo.OFProtocol); err != nil {
-				klog.Errorf("Failed to remove Service NodePort flows: %v", err)
-				continue
+
+			for ifIndex, nodeIPs := range p.nodePortAddresses {
+				if ifIndex == 1 {
+					continue
+				}
+				for _, nodeIP := range nodeIPs {
+					if err := p.ofClient.UninstallServiceFlows(nodeIP, uint16(svcInfo.NodePort()), svcInfo.OFProtocol); err != nil {
+						klog.Errorf("Failed to remove Service NodePort flows: %v", err)
+						continue
+					}
+				}
 			}
-			if err := p.routeClient.DeleteNodePort(p.nodeIPs, svcInfo, p.isIPv6); err != nil {
+
+			if err := p.routeClient.DeleteNodePort(p.nodePortAddresses, svcInfo); err != nil {
 				klog.Errorf("Failed to remove Service NodePort rules: %v", err)
 				continue
 			}
@@ -370,7 +379,7 @@ func (p *proxier) installServices() {
 				continue
 			}
 			// Install another group for local type NodePort service.
-			if p.nodePortSupport && svcInfo.NodePort() > 0 && svcInfo.OnlyNodeLocalEndpoints() {
+			if p.nodePortEnabled && svcInfo.NodePort() > 0 && svcInfo.OnlyNodeLocalEndpoints() {
 				nGroupID, _ := p.groupCounter.Get(svcPortName, nodePortLocalLabel)
 				var localEndpointList []k8sproxy.Endpoint
 				for _, ed := range endpointUpdateList {
@@ -401,20 +410,20 @@ func (p *proxier) installServices() {
 					klog.Errorf("Failed to remove flows of Service %v: %v", svcPortName, err)
 					continue
 				}
-				if p.nodePortSupport && svcInfo.NodePort() > 0 {
+				if p.nodePortEnabled && svcInfo.NodePort() > 0 {
 					err := p.ofClient.UninstallServiceFlows(p.virtualNodePortIP, uint16(pSvcInfo.NodePort()), pSvcInfo.OFProtocol)
 					if err != nil {
 						klog.Errorf("Error when removing NodePort Service flows: %v", err)
 						continue
 					}
-					err = p.routeClient.DeleteNodePort(p.nodeIPs, pSvcInfo, p.isIPv6)
+					err = p.routeClient.DeleteNodePort(p.nodePortAddresses, pSvcInfo)
 					if err != nil {
 						klog.Errorf("Error when removing NodePort Service entries in IPSet: %v", err)
 						continue
 					}
 				}
 			}
-			if err := p.ofClient.InstallServiceFlows(groupID, svcInfo.ClusterIP(), uint16(svcInfo.Port()), svcInfo.OFProtocol, uint16(svcInfo.StickyMaxAgeSeconds())); err != nil {
+			if err := p.ofClient.InstallServiceFlows(groupID, svcInfo.ClusterIP(), uint16(svcInfo.Port()), svcInfo.OFProtocol, uint16(svcInfo.StickyMaxAgeSeconds()), false); err != nil {
 				klog.Errorf("Error when installing Service flows: %v", err)
 				continue
 			}
@@ -447,16 +456,25 @@ func (p *proxier) installServices() {
 					}
 				}
 			}
-			if p.nodePortSupport && svcInfo.NodePort() > 0 {
+			if p.nodePortEnabled && svcInfo.NodePort() > 0 {
 				nGroupID := groupID
 				if svcInfo.OnlyNodeLocalEndpoints() {
 					nGroupID, _ = p.groupCounter.Get(svcPortName, nodePortLocalLabel)
 				}
-				if err := p.ofClient.InstallServiceFlows(nGroupID, p.virtualNodePortIP, uint16(svcInfo.NodePort()), svcInfo.OFProtocol, uint16(svcInfo.StickyMaxAgeSeconds())); err != nil {
-					klog.Errorf("Error when installing Service NodePort flow: %v", err)
-					continue
+
+				for ifIndex, nodeIPs := range p.nodePortAddresses {
+					if ifIndex == 1 {
+						continue
+					}
+					for _, nodeIP := range nodeIPs {
+						if err := p.ofClient.InstallServiceFlows(nGroupID, nodeIP, uint16(svcInfo.NodePort()), svcInfo.OFProtocol, uint16(svcInfo.StickyMaxAgeSeconds()), svcInfo.OnlyNodeLocalEndpoints()); err != nil {
+							klog.Errorf("Error when installing Service NodePort flow: %v", err)
+							continue
+						}
+					}
 				}
-				if err := p.routeClient.AddNodePort(p.nodeIPs, svcInfo, p.isIPv6); err != nil {
+
+				if err := p.routeClient.AddNodePort(p.nodePortAddresses, svcInfo); err != nil {
 					klog.Errorf("Error when installing Service NodePort rules: %v", err)
 					continue
 				}
@@ -630,13 +648,13 @@ func (p *proxier) deleteServiceByIP(serviceStr string) {
 
 func (p *proxier) Run(stopCh <-chan struct{}) {
 	p.onceRun.Do(func() {
-		if p.nodePortSupport {
-			if err := p.routeClient.AddNodePortRoute(p.isIPv6); err != nil {
+		if p.nodePortEnabled {
+			if err := p.routeClient.AddNodePortConfig(p.nodePortAddresses); err != nil {
 				panic(err)
 			}
 		}
 		go p.serviceConfig.Run(stopCh)
-		if p.enableEndpointSlice {
+		if p.endpointSliceEnabled {
 			go p.endpointSliceConfig.Run(stopCh)
 		} else {
 			go p.endpointsConfig.Run(stopCh)
@@ -644,65 +662,6 @@ func (p *proxier) Run(stopCh <-chan struct{}) {
 		p.stopChan = stopCh
 		p.SyncLoop()
 	})
-}
-
-// getLocalAddrs returns a list of all network addresses on the local system.
-func getLocalAddrs() ([]net.IP, error) {
-	var localAddrs []net.IP
-
-	addrs, err := net.InterfaceAddrs()
-	if err != nil {
-		return nil, err
-	}
-
-	for _, addr := range addrs {
-		ip, _, err := net.ParseCIDR(addr.String())
-		if err != nil {
-			return nil, err
-		}
-		localAddrs = append(localAddrs, ip)
-	}
-
-	return localAddrs, nil
-}
-
-func filterIPFamily(isV6 bool, ips ...net.IP) []net.IP {
-	var result []net.IP
-	for _, ip := range ips {
-		if !isV6 && !utilnet.IsIPv6(ip) {
-			result = append(result, ip)
-		} else if isV6 && utilnet.IsIPv6(ip) {
-			result = append(result, ip)
-		}
-	}
-	return result
-}
-
-func getAvailableAddresses(nodePortAddresses []*net.IPNet, podCIDR *net.IPNet, ipv6 bool) ([]net.IP, error) {
-	localAddresses, err := getLocalAddrs()
-	if err != nil {
-		return nil, err
-	}
-	var nodeIPs []net.IP
-	for _, nodeIP := range filterIPFamily(ipv6, localAddresses...) {
-		if podCIDR.Contains(nodeIP) {
-			continue
-		}
-		var contains bool
-		for _, nodePortAddress := range nodePortAddresses {
-			if nodePortAddress.Contains(nodeIP) {
-				contains = true
-				break
-			}
-		}
-		if len(nodePortAddresses) == 0 || contains {
-			nodeIPs = append(nodeIPs, nodeIP)
-		}
-	}
-	if len(nodeIPs) == 0 {
-		klog.Warningln("No qualified node IP found.")
-	}
-	return nodeIPs, nil
 }
 
 func (p *proxier) GetProxyProvider() k8sproxy.Provider {
@@ -752,14 +711,13 @@ func (p *proxier) GetServiceFlowKeys(serviceName, namespace string) ([]string, [
 
 func NewProxier(
 	virtualNodePortIP net.IP,
-	nodePortAddresses []*net.IPNet,
+	nodePortAddresses map[int][]net.IP,
 	hostname string,
-	podCIDR *net.IPNet,
 	informerFactory informers.SharedInformerFactory,
 	ofClient openflow.Client,
 	routeClient route.Interface,
 	isIPv6 bool,
-	nodePortSupport bool,
+	nodePortEnabled bool,
 ) *proxier {
 	recorder := record.NewBroadcaster().NewRecorder(
 		runtime.NewScheme(),
@@ -771,7 +729,7 @@ func NewProxier(
 	enableEndpointSlice := features.DefaultFeatureGate.Enabled(features.EndpointSlice)
 
 	p := &proxier{
-		enableEndpointSlice:      enableEndpointSlice,
+		endpointSliceEnabled:     enableEndpointSlice,
 		endpointsConfig:          config.NewEndpointsConfig(informerFactory.Core().V1().Endpoints(), resyncPeriod),
 		serviceConfig:            config.NewServiceConfig(informerFactory.Core().V1().Services(), resyncPeriod),
 		endpointsChanges:         newEndpointsChangesTracker(hostname, enableEndpointSlice, isIPv6),
@@ -787,19 +745,11 @@ func NewProxier(
 		ofClient:                 ofClient,
 		routeClient:              routeClient,
 		virtualNodePortIP:        virtualNodePortIP,
+		nodePortAddresses:        nodePortAddresses,
 		isIPv6:                   isIPv6,
-		nodePortSupport:          nodePortSupport,
+		nodePortEnabled:          nodePortEnabled,
 	}
 
-	if nodePortSupport {
-		nodeIPs, err := getAvailableAddresses(nodePortAddresses, podCIDR, isIPv6)
-		if err != nil {
-			klog.Errorf("%v", err)
-			return nil
-		}
-		klog.Infof("Proxy NodePort Services on addresses: %v", nodeIPs)
-		p.nodeIPs = nodeIPs
-	}
 	p.serviceConfig.RegisterEventHandler(p)
 	p.endpointsConfig.RegisterEventHandler(p)
 	p.runner = k8sproxy.NewBoundedFrequencyRunner(componentName, p.syncProxyRules, time.Second, 30*time.Second, 2)
@@ -847,21 +797,19 @@ func (p *metaProxierWrapper) GetServiceByIP(serviceStr string) (k8sproxy.Service
 func NewDualStackProxier(
 	virtualNodePortIP net.IP,
 	virtualNodePortIPv6 net.IP,
-	nodePortAddresses []*net.IPNet,
+	nodePortAddresses map[int][]net.IP,
 	hostname string,
-	podIPv4CIDR *net.IPNet,
-	podIPv6CIDR *net.IPNet,
 	informerFactory informers.SharedInformerFactory,
 	ofClient openflow.Client,
 	routeClient route.Interface,
-	nodePortSupport bool,
+	nodePortEnabled bool,
 ) *metaProxierWrapper {
 
 	// Create an ipv4 instance of the single-stack proxier.
-	ipv4Proxier := NewProxier(virtualNodePortIP, nodePortAddresses, hostname, podIPv4CIDR, informerFactory, ofClient, routeClient, false, nodePortSupport)
+	ipv4Proxier := NewProxier(virtualNodePortIP, nodePortAddresses, hostname, informerFactory, ofClient, routeClient, false, nodePortEnabled)
 
 	// Create an ipv6 instance of the single-stack proxier.
-	ipv6Proxier := NewProxier(virtualNodePortIPv6, nodePortAddresses, hostname, podIPv6CIDR, informerFactory, ofClient, routeClient, true, nodePortSupport)
+	ipv6Proxier := NewProxier(virtualNodePortIPv6, nodePortAddresses, hostname, informerFactory, ofClient, routeClient, true, nodePortEnabled)
 
 	// Create a meta-proxier that dispatch calls between the two
 	// single-stack proxier instances.

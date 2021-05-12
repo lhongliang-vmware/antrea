@@ -51,31 +51,31 @@ func (m *MockInterface) EXPECT() *MockInterfaceMockRecorder {
 }
 
 // AddNodePort mocks base method
-func (m *MockInterface) AddNodePort(arg0 []net.IP, arg1 *types.ServiceInfo, arg2 bool) error {
+func (m *MockInterface) AddNodePort(arg0 map[int][]net.IP, arg1 *types.ServiceInfo) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "AddNodePort", arg0, arg1, arg2)
+	ret := m.ctrl.Call(m, "AddNodePort", arg0, arg1)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // AddNodePort indicates an expected call of AddNodePort
-func (mr *MockInterfaceMockRecorder) AddNodePort(arg0, arg1, arg2 interface{}) *gomock.Call {
+func (mr *MockInterfaceMockRecorder) AddNodePort(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddNodePort", reflect.TypeOf((*MockInterface)(nil).AddNodePort), arg0, arg1, arg2)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddNodePort", reflect.TypeOf((*MockInterface)(nil).AddNodePort), arg0, arg1)
 }
 
-// AddNodePortRoute mocks base method
-func (m *MockInterface) AddNodePortRoute(arg0 bool) error {
+// AddNodePortConfig mocks base method
+func (m *MockInterface) AddNodePortConfig(arg0 map[int][]net.IP) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "AddNodePortRoute", arg0)
+	ret := m.ctrl.Call(m, "AddNodePortConfig", arg0)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// AddNodePortRoute indicates an expected call of AddNodePortRoute
-func (mr *MockInterfaceMockRecorder) AddNodePortRoute(arg0 interface{}) *gomock.Call {
+// AddNodePortConfig indicates an expected call of AddNodePortConfig
+func (mr *MockInterfaceMockRecorder) AddNodePortConfig(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddNodePortRoute", reflect.TypeOf((*MockInterface)(nil).AddNodePortRoute), arg0)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddNodePortConfig", reflect.TypeOf((*MockInterface)(nil).AddNodePortConfig), arg0)
 }
 
 // AddRoutes mocks base method
@@ -107,17 +107,17 @@ func (mr *MockInterfaceMockRecorder) AddSNATRule(arg0, arg1 interface{}) *gomock
 }
 
 // DeleteNodePort mocks base method
-func (m *MockInterface) DeleteNodePort(arg0 []net.IP, arg1 *types.ServiceInfo, arg2 bool) error {
+func (m *MockInterface) DeleteNodePort(arg0 map[int][]net.IP, arg1 *types.ServiceInfo) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DeleteNodePort", arg0, arg1, arg2)
+	ret := m.ctrl.Call(m, "DeleteNodePort", arg0, arg1)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // DeleteNodePort indicates an expected call of DeleteNodePort
-func (mr *MockInterfaceMockRecorder) DeleteNodePort(arg0, arg1, arg2 interface{}) *gomock.Call {
+func (mr *MockInterfaceMockRecorder) DeleteNodePort(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteNodePort", reflect.TypeOf((*MockInterface)(nil).DeleteNodePort), arg0, arg1, arg2)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteNodePort", reflect.TypeOf((*MockInterface)(nil).DeleteNodePort), arg0, arg1)
 }
 
 // DeleteRoutes mocks base method
@@ -188,20 +188,6 @@ func (m *MockInterface) Reconcile(arg0 []string) error {
 func (mr *MockInterfaceMockRecorder) Reconcile(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Reconcile", reflect.TypeOf((*MockInterface)(nil).Reconcile), arg0)
-}
-
-// ReconcileNodePort mocks base method
-func (m *MockInterface) ReconcileNodePort(arg0 []net.IP, arg1 []*types.ServiceInfo) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ReconcileNodePort", arg0, arg1)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// ReconcileNodePort indicates an expected call of ReconcileNodePort
-func (mr *MockInterfaceMockRecorder) ReconcileNodePort(arg0, arg1 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReconcileNodePort", reflect.TypeOf((*MockInterface)(nil).ReconcileNodePort), arg0, arg1)
 }
 
 // Run mocks base method

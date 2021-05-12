@@ -42,12 +42,11 @@ const (
 	defaultFlowCollectorTransport  = "tcp"
 	defaultFlowCollectorPort       = "4739"
 	defaultFlowPollInterval        = 5 * time.Second
-	defaultFlowExportFrequency    = 12
 	defaultActiveFlowExportTimeout = 60 * time.Second
 	defaultIdleFlowExportTimeout   = 15 * time.Second
 	defaultNPLPortRange            = "40000-41000"
-	defaultNodePortVirtualIP      = "169.254.169.110"
-	defaultNodePortVirtualIPv6    = "fec0::ffee:ddcc:bbaa"
+	defaultNodePortVirtualIP       = "169.254.169.110"
+	defaultNodePortVirtualIPv6     = "fec0::ffee:ddcc:bbaa"
 )
 
 type Options struct {

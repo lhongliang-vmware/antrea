@@ -26,6 +26,7 @@ import (
 	"github.com/contiv/libOpenflow/protocol"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
+	utilnet "k8s.io/utils/net"
 
 	"github.com/vmware-tanzu/antrea/pkg/agent/config"
 	"github.com/vmware-tanzu/antrea/pkg/agent/metrics"
@@ -45,7 +46,8 @@ const (
 	spoofGuardTable              binding.TableIDType = 10
 	arpResponderTable            binding.TableIDType = 20
 	ipv6Table                    binding.TableIDType = 21
-	serviceHairpinTable          binding.TableIDType = 29
+	serviceHairpinTable          binding.TableIDType = 28
+	serviceSNATTable             binding.TableIDType = 29
 	conntrackTable               binding.TableIDType = 30
 	conntrackStateTable          binding.TableIDType = 31
 	sessionAffinityTable         binding.TableIDType = 40
@@ -67,7 +69,9 @@ const (
 	IngressDefaultTable          binding.TableIDType = 100
 	IngressMetricTable           binding.TableIDType = 101
 	conntrackCommitTable         binding.TableIDType = 105
-	hairpinSNATTable             binding.TableIDType = 106
+	serviceConntrackTable        binding.TableIDType = 106
+	serviceDstMacRewriteTable    binding.TableIDType = 107
+	hairpinSNATTable             binding.TableIDType = 108
 	L2ForwardingOutTable         binding.TableIDType = 110
 
 	// Flow priority level
@@ -111,6 +115,7 @@ var (
 		{arpResponderTable, "ARPResponder"},
 		{ipv6Table, "IPv6"},
 		{serviceHairpinTable, "ServiceHairpin"},
+		{serviceSNATTable, "serviceSNAT"},
 		{conntrackTable, "ConntrackZone"},
 		{conntrackStateTable, "ConntrackState"},
 		{dnatTable, "DNAT(SessionAffinity)"},
@@ -130,7 +135,9 @@ var (
 		{IngressDefaultTable, "IngressDefaultRule"},
 		{IngressMetricTable, "IngressMetric"},
 		{conntrackCommitTable, "ConntrackCommit"},
+		{serviceConntrackTable, "serviceConntrack"},
 		{hairpinSNATTable, "HairpinSNATTable"},
+		{serviceDstMacRewriteTable, "serviceDstMacRewrite"},
 		{L2ForwardingOutTable, "Output"},
 	}
 )
@@ -224,8 +231,10 @@ const (
 	// the selection result needs to be cached.
 	marksRegServiceNeedLearn uint32 = 0b011
 
-	CtZone   = 0xfff0
-	CtZoneV6 = 0xffe6
+	CtZone          = 0xfff0
+	CtZoneV6        = 0xffe6
+	ServiceCtZone   = 0xfff1
+	ServiceCtZoneV6 = 0xffe7
 
 	portFoundMark = 0b1
 	hairpinMark   = 0b1
@@ -322,6 +331,9 @@ var (
 	// a SNAT IP. The bit range must match SNATIPMarkMask.
 	snatPktMarkRange = binding.Range{0, 7}
 
+	// serviceTrafficSrcMAC takes 0..47 range of ct_label to store the source MAC address of Service traffic.
+	serviceTrafficSrcMacRange = binding.Range{0, 47}
+
 	globalVirtualMAC, _ = net.ParseMAC("aa:bb:cc:dd:ee:ff")
 	hairpinIP           = net.ParseIP("169.254.169.252").To4()
 	hairpinIPv6         = net.ParseIP("fc00::aabb:ccdd:eeff").To16()
@@ -352,15 +364,16 @@ func portToUint16(port int) uint16 {
 }
 
 type client struct {
-	enableProxy        bool
-	enableAntreaPolicy bool
-	enableEgress       bool
-	roundInfo          types.RoundInfo
-	cookieAllocator    cookie.Allocator
-	bridge             binding.Bridge
-	egressEntryTable   binding.TableIDType
-	ingressEntryTable  binding.TableIDType
-	pipeline           map[binding.TableIDType]binding.Table
+	enableProxy           bool
+	enableAntreaPolicy    bool
+	enableEgress          bool
+	enabledAntreaNodePort bool
+	roundInfo             types.RoundInfo
+	cookieAllocator       cookie.Allocator
+	bridge                binding.Bridge
+	egressEntryTable      binding.TableIDType
+	ingressEntryTable     binding.TableIDType
+	pipeline              map[binding.TableIDType]binding.Table
 	// Flow caches for corresponding deletions.
 	nodeFlowCache, podFlowCache, serviceFlowCache, snatFlowCache, tfFlowCache *flowCategoryCache
 	// "fixed" flows installed by the agent after initialization and which do not change during
@@ -383,9 +396,12 @@ type client struct {
 	encapMode     config.TrafficEncapModeType
 	gatewayOFPort uint32
 	// ovsDatapathType is the type of the datapath used by the bridge.
-	ovsDatapathType     ovsconfig.OVSDatapathType
-	nodePortVirtualIPv4 net.IP // The virtual IPv4 used for host forwarding, it can be nil if NodePort support is not enabled.
-	nodePortVirtualIPv6 net.IP // The virtual IPv6 used for host forwarding, it can be nil if NodePort support is not enabled.
+	ovsDatapathType ovsconfig.OVSDatapathType
+	// nodePortVirtualIPv4 is used for localhost NodePort traffic source IP masquerading, it can be nil if NodePort support is not enabled.
+	nodePortVirtualIPv4 net.IP
+	// nodePortVirtualIPv6 is used for localhost NodePort traffic source IP masquerading, it can be nil if NodePort support is not enabled.
+	nodePortVirtualIPv6 net.IP
+	nodePortAddresses   map[int][]net.IP
 	// packetInHandlers stores handler to process PacketIn event. Each packetin reason can have multiple handlers registered.
 	// When a packetin arrives, openflow send packet to registered handlers in this map.
 	packetInHandlers map[uint8]map[string]PacketInHandler
@@ -568,6 +584,8 @@ func (c *client) connectionTrackFlows(category cookie.Category) []binding.Flow {
 	connectionTrackTable := c.pipeline[conntrackTable]
 	connectionTrackStateTable := c.pipeline[conntrackStateTable]
 	connectionTrackCommitTable := c.pipeline[conntrackCommitTable]
+	serviceConnectionTrackTable := c.pipeline[serviceConntrackTable]
+
 	flows := c.conntrackBasicFlows(category)
 	if c.enableProxy {
 		flows = append(flows,
@@ -601,6 +619,32 @@ func (c *client) connectionTrackFlows(category cookie.Category) []binding.Flow {
 				Action().GotoTable(connectionTrackCommitTable.GetNext()).
 				Done(),
 		)
+		if c.enabledAntreaNodePort {
+			flows = append(flows,
+				connectionTrackCommitTable.BuildFlow(priorityHigh).MatchProtocol(binding.ProtocolIP).
+					MatchCTStateTrk(true).
+					MatchCTMark(ServiceCTMark, nil).
+					MatchRegRange(int(marksReg), markTrafficFromGateway, binding.Range{0, 15}).
+					Cookie(c.cookieAllocator.Request(category).Raw()).
+					Action().GotoTable(connectionTrackCommitTable.GetNext()).
+					Done(),
+				connectionTrackCommitTable.BuildFlow(priorityHigh).MatchProtocol(binding.ProtocolIPv6).
+					MatchCTStateTrk(true).
+					MatchCTMark(ServiceCTMark, nil).
+					MatchRegRange(int(marksReg), markTrafficFromGateway, binding.Range{0, 15}).
+					Cookie(c.cookieAllocator.Request(category).Raw()).
+					Action().GotoTable(connectionTrackCommitTable.GetNext()).
+					Done(),
+				serviceConnectionTrackTable.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
+					Action().CT(false, serviceConnectionTrackTable.GetNext(), ServiceCtZone).NAT().CTDone().
+					Cookie(c.cookieAllocator.Request(category).Raw()).
+					Done(),
+				serviceConnectionTrackTable.BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIPv6).
+					Action().CT(false, serviceConnectionTrackTable.GetNext(), ServiceCtZoneV6).NAT().CTDone().
+					Cookie(c.cookieAllocator.Request(category).Raw()).
+					Done(),
+			)
+		}
 	} else {
 		flows = append(flows, c.kubeProxyFlows(category)...)
 	}
@@ -636,6 +680,60 @@ func (c *client) connectionTrackFlows(category cookie.Category) []binding.Flow {
 			c.conntrackBypassRejectFlow(proto),
 		)
 	}
+	return flows
+}
+
+// serviceNodePortLocalhostSNATFlows generates flows that handle NodePort traffic from localhost. These flows matches
+// the packets that have the same IP address of nw_src and nw_dst, then set nw_src to a virtual IP address.
+func (c *client) serviceNodePortLocalhostSNATFlows() []binding.Flow {
+	var flows []binding.Flow
+	for _, addrs := range c.nodePortAddresses {
+		for _, addr := range addrs {
+			if !utilnet.IsIPv6(addr) {
+				flows = append(flows,
+					c.pipeline[serviceHairpinTable].BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
+						MatchDstIP(addr).
+						MatchSrcIP(addr).
+						Action().SetSrcIP(c.nodePortVirtualIPv4).
+						Action().GotoTable(serviceSNATTable).
+						Cookie(c.cookieAllocator.Request(cookie.Service).Raw()).
+						Done())
+			} else if utilnet.IsIPv6(addr) && c.IsIPv6Enabled() {
+				flows = append(flows,
+					c.pipeline[serviceHairpinTable].BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIPv6).
+						MatchDstIP(addr).
+						MatchSrcIP(addr).
+						Action().SetSrcIP(c.nodePortVirtualIPv6).
+						Action().GotoTable(serviceSNATTable).
+						Cookie(c.cookieAllocator.Request(cookie.Service).Raw()).
+						Done())
+			}
+		}
+	}
+	return flows
+}
+
+// serviceNodePortLocalhostUnsnatFlows that handle NodePort replied traffic from localhost. These flows matches
+// the packets that nw_dst is NodePort virtual IP, then set nw_dst the same as nw_src.
+func (c *client) serviceNodePortLocalhostUnsnatFlows() []binding.Flow {
+	var flows []binding.Flow
+
+	flows = append(flows, c.pipeline[hairpinSNATTable].BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIP).
+		MatchDstIP(c.nodePortVirtualIPv4).
+		Action().Move(binding.NxmFieldSrcIPv4, binding.NxmFieldDstIPv4).
+		Action().GotoTable(L2ForwardingOutTable).
+		Cookie(c.cookieAllocator.Request(cookie.Service).Raw()).
+		Done())
+
+	if c.IsIPv6Enabled() {
+		flows = append(flows, c.pipeline[hairpinSNATTable].BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolIPv6).
+			MatchDstIP(c.nodePortVirtualIPv6).
+			Action().Move(binding.NxmFieldSrcIPv6, binding.NxmFieldDstIPv6).
+			Action().GotoTable(L2ForwardingOutTable).
+			Cookie(c.cookieAllocator.Request(cookie.Service).Raw()).
+			Done())
+	}
+
 	return flows
 }
 
@@ -1213,22 +1311,6 @@ func (c *client) arpResponderFlow(peerGatewayIP net.IP, category cookie.Category
 		Done()
 }
 
-func (c *client) arpNodePortVirtualResponderFlow() binding.Flow {
-	return c.pipeline[arpResponderTable].BuildFlow(priorityNormal).MatchProtocol(binding.ProtocolARP).
-		MatchARPOp(1).
-		MatchARPTpa(c.nodePortVirtualIPv4).
-		Action().Move(binding.NxmFieldSrcMAC, binding.NxmFieldDstMAC).
-		Action().SetSrcMAC(globalVirtualMAC).
-		Action().LoadARPOperation(2).
-		Action().Move(binding.NxmFieldARPSha, binding.NxmFieldARPTha).
-		Action().SetARPSha(globalVirtualMAC).
-		Action().Move(binding.NxmFieldARPSpa, binding.NxmFieldARPTpa).
-		Action().SetARPSpa(c.nodePortVirtualIPv4).
-		Action().OutputInPort().
-		Cookie(c.cookieAllocator.Request(cookie.Service).Raw()).
-		Done()
-}
-
 // arpResponderStaticFlow generates ARP reply for any ARP request with the same global virtual MAC.
 // This flow is used in policy-only mode, where traffic are routed via IP not MAC.
 func (c *client) arpResponderStaticFlow(category cookie.Category) binding.Flow {
@@ -1291,12 +1373,12 @@ func getIPProtocol(ip net.IP) binding.Protocol {
 // IP of the hairpin packet to the source IP.
 func (c *client) serviceHairpinResponseDNATFlow(ipProtocol binding.Protocol) binding.Flow {
 	hpIP := hairpinIP
-	from := "NXM_OF_IP_SRC"
-	to := "NXM_OF_IP_DST"
+	from := binding.NxmFieldSrcIPv4
+	to := binding.NxmFieldDstIPv4
 	if ipProtocol == binding.ProtocolIPv6 {
 		hpIP = hairpinIPv6
-		from = "NXM_NX_IPV6_SRC"
-		to = "NXM_NX_IPV6_DST"
+		from = binding.NxmFieldSrcIPv6
+		to = binding.NxmFieldDstIPv6
 	}
 	return c.pipeline[serviceHairpinTable].BuildFlow(priorityNormal).MatchProtocol(ipProtocol).
 		MatchDstIP(hpIP).
@@ -2050,20 +2132,74 @@ func (c *client) serviceEndpointGroup(groupID binding.GroupIDType, withSessionAf
 	return group
 }
 
-// serviceGatewayFlow replies Service packets back to external addresses without entering Gateway CTZone.
-func (c *client) serviceGatewayFlow(isIPv6 bool) binding.Flow {
-	builder := c.pipeline[conntrackCommitTable].BuildFlow(priorityHigh).
-		MatchCTMark(ServiceCTMark, nil).
-		MatchCTStateNew(true).
-		MatchCTStateTrk(true).
+// serviceSNATFlow generates the flow that handles the Service traffic which is from gateway. For NodePort without
+// externalTrafficPolicy and ClusterIP, the source Service IP will be masqueraded as gateway's IP. For Nodeport with
+// externalTrafficPolicy, the source Service IP will be reserved. The source MAC address of Service packet will be
+// stored to ct_label and the source MAC address will be as the destination MAC address of replied packets.
+func (c *client) serviceSNATFlow(svcIP net.IP, svcPort uint16, protocol binding.Protocol, gatewayIP net.IP, isNodePortLocal bool) binding.Flow {
+	ipProtocol := getIPProtocol(svcIP)
+	table := c.pipeline[serviceSNATTable]
+
+	flowBuilder := table.BuildFlow(priorityNormal).
+		Cookie(c.cookieAllocator.Request(cookie.Service).Raw()).
+		MatchProtocol(protocol).
+		MatchDstPort(svcPort, nil).
+		MatchDstIP(svcIP).
 		MatchRegRange(int(marksReg), markTrafficFromGateway, binding.Range{0, 15}).
-		Action().GotoTable(L2ForwardingOutTable).
+		MatchDstIP(svcIP)
+
+	serviceCtZone := ServiceCtZone
+	if ipProtocol == binding.ProtocolIPv6 {
+		serviceCtZone = ServiceCtZoneV6
+	}
+
+	if !isNodePortLocal {
+		return flowBuilder.Action().CT(true, table.GetNext(), serviceCtZone).
+			SNAT(
+				&binding.IPRange{StartIP: gatewayIP, EndIP: gatewayIP},
+				nil,
+			).
+			MoveToLabel(binding.NxmFieldSrcMAC, &binding.Range{0, 47}, &serviceTrafficSrcMacRange).
+			CTDone().
+			Done()
+	} else {
+		return flowBuilder.Action().CT(true, table.GetNext(), serviceCtZone).
+			MoveToLabel(binding.NxmFieldSrcMAC, &binding.Range{0, 47}, &serviceTrafficSrcMacRange).
+			CTDone().
+			Done()
+	}
+}
+
+// serviceDstMacRewriteFlow sets destination MAC address of replied Service packets back to external addresses.
+func (c *client) serviceDstMacRewriteFlow(svcIP net.IP, svcPort uint16, protocol binding.Protocol) binding.Flow {
+	builder := c.pipeline[serviceDstMacRewriteTable].BuildFlow(priorityNormal).
+		Cookie(c.cookieAllocator.Request(cookie.Service).Raw()).
+		MatchProtocol(protocol).
+		MatchSrcPort(svcPort, nil).
+		MatchSrcIP(svcIP).
+		Action().MoveRange(binding.NxmFieldCtLabel, binding.NxmFieldDstMAC, serviceTrafficSrcMacRange, binding.Range{0, 47}).
+		Action().GotoTable(hairpinSNATTable).
 		Cookie(c.cookieAllocator.Request(cookie.Service).Raw())
 
-	if isIPv6 {
-		return builder.MatchProtocol(binding.ProtocolIPv6).Done()
+	return builder.Done()
+}
+
+func (c *client) ServiceConntrackFlow() []binding.Flow {
+	serviceConnectionTrackTable := c.pipeline[serviceConntrackTable]
+	var flows []binding.Flow
+	for _, proto := range c.ipProtocols {
+		serviceCtZone := ServiceCtZone
+		if proto == binding.ProtocolIPv6 {
+			serviceCtZone = ServiceCtZoneV6
+		}
+		flows = append(flows,
+			serviceConnectionTrackTable.BuildFlow(priorityNormal).MatchProtocol(proto).
+				Action().CT(false, serviceConnectionTrackTable.GetNext(), serviceCtZone).CTDone().
+				Cookie(c.cookieAllocator.Request(cookie.Service).Raw()).
+				Done(),
+		)
 	}
-	return builder.MatchProtocol(binding.ProtocolIP).Done()
+	return flows
 }
 
 // decTTLFlows decrements TTL by one for the packets forwarded across Nodes.
@@ -2127,12 +2263,15 @@ func (c *client) generatePipeline() {
 	if c.enableProxy {
 		c.pipeline[spoofGuardTable] = bridge.CreateTable(spoofGuardTable, serviceHairpinTable, binding.TableMissActionDrop)
 		c.pipeline[ipv6Table] = bridge.CreateTable(ipv6Table, serviceHairpinTable, binding.TableMissActionNext)
-		c.pipeline[serviceHairpinTable] = bridge.CreateTable(serviceHairpinTable, conntrackTable, binding.TableMissActionNext)
+		c.pipeline[serviceHairpinTable] = bridge.CreateTable(serviceHairpinTable, serviceSNATTable, binding.TableMissActionNext)
+		c.pipeline[serviceSNATTable] = bridge.CreateTable(serviceSNATTable, conntrackTable, binding.TableMissActionNext)
 		c.pipeline[conntrackStateTable] = bridge.CreateTable(conntrackStateTable, endpointDNATTable, binding.TableMissActionNext)
 		c.pipeline[sessionAffinityTable] = bridge.CreateTable(sessionAffinityTable, binding.LastTableID, binding.TableMissActionNone)
 		c.pipeline[serviceLBTable] = bridge.CreateTable(serviceLBTable, endpointDNATTable, binding.TableMissActionNext)
 		c.pipeline[endpointDNATTable] = bridge.CreateTable(endpointDNATTable, c.egressEntryTable, binding.TableMissActionNext)
-		c.pipeline[conntrackCommitTable] = bridge.CreateTable(conntrackCommitTable, hairpinSNATTable, binding.TableMissActionNext)
+		c.pipeline[conntrackCommitTable] = bridge.CreateTable(conntrackCommitTable, serviceConntrackTable, binding.TableMissActionNext)
+		c.pipeline[serviceConntrackTable] = bridge.CreateTable(serviceConntrackTable, serviceDstMacRewriteTable, binding.TableMissActionNext)
+		c.pipeline[serviceDstMacRewriteTable] = bridge.CreateTable(serviceDstMacRewriteTable, hairpinSNATTable, binding.TableMissActionNext)
 		c.pipeline[hairpinSNATTable] = bridge.CreateTable(hairpinSNATTable, L2ForwardingOutTable, binding.TableMissActionNext)
 	} else {
 		c.pipeline[spoofGuardTable] = bridge.CreateTable(spoofGuardTable, conntrackTable, binding.TableMissActionDrop)
@@ -2160,9 +2299,11 @@ func NewClient(bridgeName string,
 	ovsDatapathType ovsconfig.OVSDatapathType,
 	nodePortVirtualIPv4 net.IP,
 	nodePortVirtualIPv6 net.IP,
+	nodePortAddresses map[int][]net.IP,
 	enableProxy bool,
 	enableAntreaPolicy bool,
-	enableEgress bool) Client {
+	enableEgress bool,
+	enabledAntreaNodePort bool) Client {
 	bridge := binding.NewOFBridge(bridgeName, mgmtAddr)
 	policyCache := cache.NewIndexer(
 		policyConjKeyFunc,
@@ -2172,9 +2313,11 @@ func NewClient(bridgeName string,
 		bridge:                   bridge,
 		nodePortVirtualIPv4:      nodePortVirtualIPv4,
 		nodePortVirtualIPv6:      nodePortVirtualIPv6,
+		nodePortAddresses:        nodePortAddresses,
 		enableProxy:              enableProxy,
 		enableAntreaPolicy:       enableAntreaPolicy,
 		enableEgress:             enableEgress,
+		enabledAntreaNodePort:    enabledAntreaNodePort,
 		nodeFlowCache:            newFlowCategoryCache(),
 		podFlowCache:             newFlowCategoryCache(),
 		serviceFlowCache:         newFlowCategoryCache(),

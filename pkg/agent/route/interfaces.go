@@ -39,19 +39,14 @@ type Interface interface {
 	// It should do nothing if the routes don't exist, without error.
 	DeleteRoutes(podCIDR *net.IPNet) error
 
-	// AddRoutes should add the route to the NodePort virtual IP.
-	AddNodePortRoute(isIPv6 bool) error
+	// AddNodePortConfig should add the basic TC configuration on Linux.
+	AddNodePortConfig(nodeIPsMap map[int][]net.IP) error
 
-	// ReconcileNodePort should remove orphaned NodePort ipset entries.
-	ReconcileNodePort(nodeIPs []net.IP, svcEntries []*types.ServiceInfo) error
+	// AddNodePort should add related configuration about the NodePort Service to TC on Linux.
+	AddNodePort(nodeIPsMap map[int][]net.IP, svcInfo *types.ServiceInfo) error
 
-	// AddNodePort should add entries of the NodePort Service to the ipset.
-	// It should have no effect if the entry already exist, without error.
-	AddNodePort(nodeIPs []net.IP, svcInfo *types.ServiceInfo, isIPv6 bool) error
-
-	// DeleteNodePort should delete entries of the NodePort Service from ipset.
-	// It should do nothing if entries of the NodePort Service don't exist, without error.
-	DeleteNodePort(nodeIPs []net.IP, svcInfo *types.ServiceInfo, isIPv6 bool) error
+	// DeleteNodePort should delete related configuration about the NodePort Service to TC on Linux.
+	DeleteNodePort(nodeIPsMap map[int][]net.IP, svcInfo *types.ServiceInfo) error
 
 	// MigrateRoutesToGw should move routes from device linkname to local gateway.
 	MigrateRoutesToGw(linkName string) error

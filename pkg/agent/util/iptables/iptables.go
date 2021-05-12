@@ -38,7 +38,6 @@ const (
 	MasqueradeTarget = "MASQUERADE"
 	MarkTarget       = "MARK"
 	ConnTrackTarget  = "CT"
-	DNATTarget       = "DNAT"
 	NoTrackTarget    = "NOTRACK"
 	SNATTarget       = "SNAT"
 
@@ -132,9 +131,8 @@ func (c *Client) ChainExists(table string, chain string) (bool, error) {
 	return false, nil
 }
 
-// EnsureRule checks if target rule already exists, add it if not. If prepend is true, the rule will be added to the top
-// of the chain. Otherwise, the rule will be appended to the chain.
-func (c *Client) EnsureRule(table string, chain string, ruleSpec []string, prepend bool) error {
+// EnsureRule checks if target rule already exists, appends it if not.
+func (c *Client) EnsureRule(table string, chain string, ruleSpec []string) error {
 	for idx := range c.ipts {
 		ipt := c.ipts[idx]
 		exist, err := ipt.Exists(table, chain, ruleSpec...)
@@ -144,13 +142,7 @@ func (c *Client) EnsureRule(table string, chain string, ruleSpec []string, prepe
 		if exist {
 			return nil
 		}
-		var f func() error
-		if !prepend {
-			f = func() error { return ipt.Append(table, chain, ruleSpec...) }
-		} else {
-			f = func() error { return ipt.Insert(table, chain, 1, ruleSpec...) }
-		}
-		if err := f(); err != nil {
+		if err := ipt.Append(table, chain, ruleSpec...); err != nil {
 			return fmt.Errorf("error appending rule %v to table %s chain %s: %v", ruleSpec, table, chain, err)
 		}
 	}

@@ -47,19 +47,15 @@ type Client struct {
 	fwClient    *winfirewall.Client
 }
 
-func (c *Client) AddNodePortRoute(isIPv6 bool) error {
+func (c *Client) AddNodePortConfig(nodeIPsMap map[int][]net.IP) error {
 	return nil
 }
 
-func (c *Client) AddNodePort(nodeIPs []net.IP, svcInfo *types.ServiceInfo, isIPv6 bool) error {
+func (c *Client) AddNodePort(nodeIPsMap map[int][]net.IP, svcInfo *types.ServiceInfo) error {
 	return nil
 }
 
-func (c *Client) DeleteNodePort(nodeIPs []net.IP, svcInfo *types.ServiceInfo, isIPv6 bool) error {
-	return nil
-}
-
-func (c *Client) ReconcileNodePort(nodeIPs []net.IP, ports []*types.ServiceInfo) error {
+func (c *Client) DeleteNodePort(nodeIPsMap map[int][]net.IP, svcInfo *types.ServiceInfo) error {
 	return nil
 }
 
