@@ -17,6 +17,8 @@ package route
 import (
 	"bytes"
 	"fmt"
+	"github.com/vishvananda/netlink/nl"
+	utilnet "k8s.io/utils/net"
 	"net"
 	"reflect"
 	"strconv"
@@ -28,9 +30,10 @@ import (
 	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"github.com/vmware-tanzu/antrea/pkg/agent/config"
+	proxytypes "github.com/vmware-tanzu/antrea/pkg/agent/proxy/types"
 	"github.com/vmware-tanzu/antrea/pkg/agent/types"
 	"github.com/vmware-tanzu/antrea/pkg/agent/util"
 	"github.com/vmware-tanzu/antrea/pkg/agent/util/ipset"
@@ -152,7 +155,49 @@ func (c *Client) syncIPInfra() {
 		klog.Errorf("Failed to sync iptables: %v", err)
 		return
 	}
-	klog.V(3).Infof("Successfully synced node iptables")
+	if err := c.syncRoutes(); err != nil {
+		klog.Errorf("Failed to sync routes: %v", err)
+	}
+	klog.V(3).Infof("Successfully synced node iptables and routes")
+}
+
+func (c *Client) syncRoutes() error {
+	routeList, err := netlink.RouteList(nil, netlink.FAMILY_ALL)
+	if err != nil {
+		return err
+	}
+	routeMap := make(map[string]*netlink.Route)
+	for i := range routeList {
+		r := &routeList[i]
+		if r.Dst == nil {
+			continue
+		}
+		routeMap[r.Dst.String()] = r
+	}
+	c.nodeRoutes.Range(func(_, v interface{}) bool {
+		for _, route := range v.([]*netlink.Route) {
+			r, ok := routeMap[route.Dst.String()]
+			if ok && routeEqual(route, r) {
+				continue
+			}
+			if err := netlink.RouteReplace(route); err != nil {
+				klog.Errorf("Failed to add route to the gateway: %v", err)
+				return false
+			}
+		}
+		return true
+	})
+	return nil
+}
+
+func routeEqual(x, y *netlink.Route) bool {
+	if x == nil || y == nil {
+		return false
+	}
+	return x.LinkIndex == y.LinkIndex &&
+		x.Dst.IP.Equal(y.Dst.IP) &&
+		bytes.Equal(x.Dst.Mask, y.Dst.Mask) &&
+		x.Gw.Equal(y.Gw)
 }
 
 // syncIPSet ensures that the required ipset exists and it has the initial members.
@@ -578,13 +623,14 @@ func (c *Client) DeleteRoutes(podCIDR *net.IPNet) error {
 
 	routes, exists := c.nodeRoutes.Load(podCIDRStr)
 	if exists {
+		c.nodeRoutes.Delete(podCIDRStr)
 		for _, r := range routes.([]*netlink.Route) {
 			klog.V(4).Infof("Deleting route %v", r)
 			if err := netlink.RouteDel(r); err != nil && err != unix.ESRCH {
+				c.nodeRoutes.Store(podCIDRStr, routes)
 				return err
 			}
 		}
-		c.nodeRoutes.Delete(podCIDRStr)
 	}
 	if podCIDR.IP.To4() == nil {
 		neigh, exists := c.nodeNeighbors.Load(podCIDRStr)
@@ -713,4 +759,176 @@ func (c *Client) DeleteSNATRule(mark uint32) error {
 	c.markToSNATIP.Delete(mark)
 	snatIP := value.(net.IP)
 	return c.ipt.DeleteRule(iptables.NATTable, antreaPostRoutingChain, c.snatRuleSpec(snatIP, mark))
+}
+
+func (c *Client) AddNodePortConfig(nodePortAddresses map[int][]net.IP) error {
+	defaultGatewayIndex, err := getDefaultHostGatewayIndex()
+	if err != nil {
+		return err
+	}
+	delete(nodePortAddresses, defaultGatewayIndex)
+	//fmt.Println(nodePortAddresses)
+	cleanQdisc(nodePortAddresses, defaultGatewayIndex)
+
+	for ifIndex, nodeIPs := range nodePortAddresses {
+		if ifIndex == 1 {
+			continue
+		}
+		err = generalInterfaceConfigAdd(ifIndex, nodeIPs)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = ovsGatewayConfigAdd(defaultGatewayIndex, nodePortAddresses)
+	if err != nil {
+		return err
+	}
+	err = loopbackConfigAdd(nodePortAddresses)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *Client) AddNodePort(nodeIPsMap map[int][]net.IP, svcInfo *proxytypes.ServiceInfo) error {
+	port := uint32(svcInfo.NodePort())
+	protocol := svcInfo.Protocol()
+	gatewayIfIndex, err := getDefaultHostGatewayIndex()
+	if err != nil {
+		return err
+	}
+
+	bucket := getFilterBucket(port)
+	index := getFilterIndex(port)
+
+	actions := []netlink.Action{actionRedirect(gatewayIfIndex, netlink.TCA_EGRESS_REDIR)}
+	for ifIndex, nodeIPs := range nodeIPsMap {
+		var parentId uint32
+		if ifIndex == 1 {
+			parentId = qdiscHtbId
+		} else {
+			parentId = qdiscIngressId
+		}
+
+		// Add filter to interfaces to match NodePort traffic from remote hosts. These filters match NodePort traffic with TCP
+		// destination port and the matched NodePort traffic will be redirected to antrea-gw0's egress.
+		filterInstalled := make(map[bool]bool)
+		for _, nodeIP := range nodeIPs {
+			// As there may be multiple IPv4/IPv6 addresses, installing filter once is okay for IPv4/IPv6.
+			isIPv6 := utilnet.IsIPv6(nodeIP)
+			if !filterInstalled[isIPv6] {
+				handleOffset := getHandleOffset(isIPv6, protocol)
+
+				keys := buildSelector(nil, isIPv6, []netlink.TcU32Key{matchDstPort(port, isIPv6)}, nl.TC_U32_TERMINAL)
+				err := filterAdd(ifIndex, priority, parentId, handleOffset+uint32(ifIndex), bucket, index, keys, actions)
+				if err != nil {
+					return err
+				}
+				filterInstalled[isIPv6] = true
+			}
+		}
+	}
+
+	for ifIndex, nodeIPs := range nodeIPsMap {
+		if ifIndex == 1 {
+			actions = []netlink.Action{actionRedirect(ifIndex, netlink.TCA_INGRESS_REDIR)}
+		} else {
+			actions = []netlink.Action{actionRedirect(ifIndex, netlink.TCA_EGRESS_REDIR)}
+		}
+		for i, nodeIP := range nodeIPs {
+			isIPv6 := utilnet.IsIPv6(nodeIP)
+			handleOffset := getHandleOffset(isIPv6, protocol)
+
+			// Add filters to antrea-gw0 to process reply NodePort traffic from local IP addresses. The filter matches NodePort traffic with
+			// TCP source port, source and destination IP address, then the matched NodePort traffic will be redirected to target interface's
+			// egress.
+			keys := buildSelector(nil, isIPv6, append(matchSrcIP(nodeIP, isIPv6), matchSrcPort(port, isIPv6)), nl.TC_U32_TERMINAL)
+			err := filterAdd(gatewayIfIndex, priority, qdiscIngressId, handleOffset+uint32(ifIndex), bucket, uint32(i+8)*256+index, keys, actions)
+			if err != nil {
+				return err
+			}
+		}
+
+		if ifIndex != 1 {
+			for i, nodeIP := range nodeIPs {
+				isIPv6 := utilnet.IsIPv6(nodeIP)
+				handleOffset := getHandleOffset(isIPv6, protocol)
+
+				// Add filters to antrea-gw0 to process reply NodePort traffic from local IP addresses. The filter matches NodePort traffic with
+				// TCP source port, source and destination IP address, then the matched NodePort traffic will be redirected to lo' ingress.
+				matches := append(matchSrcIP(nodeIP, isIPv6), matchDstIP(nodeIP, isIPv6)...)
+				matches = append(matches, matchSrcPort(port, isIPv6))
+				keys := buildSelector(nil, isIPv6, matches, defaultFlags)
+				actions = []netlink.Action{actionRedirect(1, netlink.TCA_INGRESS_REDIR)}
+				err := filterAdd(gatewayIfIndex, priority, qdiscIngressId, handleOffset+uint32(ifIndex), bucket, uint32(i)*256+index, keys, actions)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *Client) DeleteNodePort(nodeIPsMap map[int][]net.IP, svcInfo *proxytypes.ServiceInfo) error {
+	port := uint32(svcInfo.NodePort())
+	protocol := svcInfo.Protocol()
+	gatewayIfIndex, err := getDefaultHostGatewayIndex()
+	if err != nil {
+		return err
+	}
+
+	bucket := getFilterBucket(port)
+	index := getFilterIndex(port)
+
+	for ifIndex, nodeIPs := range nodeIPsMap {
+		var parentId uint32
+		if ifIndex == 1 {
+			parentId = qdiscHtbId
+		} else {
+			parentId = qdiscIngressId
+		}
+
+		filterDeleted := make(map[bool]bool)
+		for _, nodeIP := range nodeIPs {
+			isIPv6 := utilnet.IsIPv6(nodeIP)
+
+			if !filterDeleted[isIPv6] {
+				handleOffset := getHandleOffset(isIPv6, protocol)
+				err := filterDelete(ifIndex, priority, parentId, handleOffset+uint32(ifIndex), bucket, index)
+				if err != nil {
+					return err
+				}
+				filterDeleted[isIPv6] = true
+			}
+		}
+	}
+
+	for ifIndex, nodeIPs := range nodeIPsMap {
+		for i, nodeIP := range nodeIPs {
+			isIPv6 := utilnet.IsIPv6(nodeIP)
+			handleOffset := getHandleOffset(isIPv6, protocol)
+
+			err := filterDelete(gatewayIfIndex, priority, qdiscIngressId, handleOffset+uint32(ifIndex), bucket, uint32(i+8)*256+index)
+			if err != nil {
+				return err
+			}
+		}
+
+		if ifIndex != 1 {
+			for i, nodeIP := range nodeIPs {
+				isIPv6 := utilnet.IsIPv6(nodeIP)
+				handleOffset := getHandleOffset(isIPv6, protocol)
+
+				err := filterDelete(gatewayIfIndex, priority, qdiscIngressId, handleOffset+uint32(ifIndex), bucket, uint32(i)*256+index)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	return nil
 }

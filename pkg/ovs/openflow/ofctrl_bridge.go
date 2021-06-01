@@ -10,7 +10,7 @@ import (
 	"github.com/contiv/libOpenflow/openflow13"
 	"github.com/contiv/ofnet/ofctrl"
 	"golang.org/x/time/rate"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"github.com/vmware-tanzu/antrea/pkg/agent/metrics"
 )
@@ -150,7 +150,7 @@ type OFBridge struct {
 
 func (b *OFBridge) CreateGroup(id GroupIDType) Group {
 	ofctrlGroup, err := b.ofSwitch.NewGroup(uint32(id), ofctrl.GroupSelect)
-	if err != nil {
+	if err != nil { // group already exists
 		ofctrlGroup = b.ofSwitch.GetGroup(uint32(id))
 	}
 	g := &ofGroup{bridge: b, ofctrl: ofctrlGroup}

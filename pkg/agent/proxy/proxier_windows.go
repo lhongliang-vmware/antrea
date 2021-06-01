@@ -26,7 +26,7 @@ import (
 // For the LoadBalancer Service traffic from outside, specific rules are install to forward the packets
 // to the host network to let kube-proxy handle the traffic.
 func (p *proxier) installLoadBalancerServiceFlows(groupID binding.GroupIDType, svcIP net.IP, svcPort uint16, protocol binding.Protocol, affinityTimeout uint16) error {
-	if err := p.ofClient.InstallServiceFlows(groupID, svcIP, svcPort, protocol, affinityTimeout); err != nil {
+	if err := p.ofClient.InstallServiceFlows(groupID, svcIP, svcPort, protocol, affinityTimeout, false); err != nil {
 		return err
 	}
 	if err := p.ofClient.InstallLoadBalancerServiceFromOutsideFlows(svcIP, svcPort, protocol); err != nil {

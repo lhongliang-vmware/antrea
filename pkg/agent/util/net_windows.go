@@ -30,7 +30,7 @@ import (
 	"github.com/antoninbas/go-powershell/backend"
 	"github.com/containernetworking/plugins/pkg/ip"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -465,4 +465,13 @@ func HostInterfaceExists(ifaceName string) bool {
 		return false
 	}
 	return true
+}
+
+// SetInterfaceMTU configures interface MTU on host for Pods. MTU change cannot be realized with HNSEndpoint because
+// there's no MTU field in HNSEndpoint:
+// https://github.com/Microsoft/hcsshim/blob/4a468a6f7ae547974bc32911395c51fb1862b7df/internal/hns/hnsendpoint.go#L12
+func SetInterfaceMTU(ifaceName string, mtu int) error {
+	cmd := fmt.Sprintf("Set-NetIPInterface -IncludeAllCompartments -InterfaceAlias \"%s\" -NlMtuBytes %d",
+		ifaceName, mtu)
+	return InvokePSCommand(cmd)
 }

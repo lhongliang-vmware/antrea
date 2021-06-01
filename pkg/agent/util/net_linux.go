@@ -25,7 +25,7 @@ import (
 	"github.com/containernetworking/plugins/pkg/ip"
 	"github.com/containernetworking/plugins/pkg/ns"
 	"github.com/vishvananda/netlink"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 // GetNetLink returns dev link from name.
@@ -38,7 +38,7 @@ func GetNetLink(dev string) netlink.Link {
 	return link
 }
 
-// GetPeerLinkBridge returns peer device and its attached bridge (if applicable)
+// GetNSPeerDevBridge returns peer device and its attached bridge (if applicable)
 // for device dev in network space indicated by nsPath
 func GetNSPeerDevBridge(nsPath, dev string) (*net.Interface, string, error) {
 	var peerIdx int

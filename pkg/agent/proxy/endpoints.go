@@ -23,14 +23,13 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1beta1"
 	apimachinerytypes "k8s.io/apimachinery/pkg/types"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"github.com/vmware-tanzu/antrea/pkg/agent/proxy/types"
 	k8sproxy "github.com/vmware-tanzu/antrea/third_party/proxy"
 )
 
 var supportedEndpointSliceAddressTypes = map[discovery.AddressType]struct{}{
-	discovery.AddressTypeIP:   {}, // IP is a deprecated address type
 	discovery.AddressTypeIPv4: {},
 	discovery.AddressTypeIPv6: {},
 }
@@ -108,7 +107,7 @@ func (t *endpointsChangesTracker) OnEndpointUpdate(previous, current *corev1.End
 	return len(t.changes) > 0
 }
 
-// EndpointSliceUpdate updates the given service's endpoints change map based on the <previous, current> endpoints pair.
+// OnEndpointSliceUpdate updates the given service's endpoints change map based on the <previous, current> endpoints pair.
 // It returns true if items changed, otherwise it returns false. Will add/update/delete items of endpointsChange Map.
 // If removeSlice is true, slice will be removed, otherwise it will be added or updated.
 func (t *endpointsChangesTracker) OnEndpointSliceUpdate(endpointSlice *discovery.EndpointSlice, removeSlice bool) bool {
@@ -219,4 +218,17 @@ func (t *endpointsChangesTracker) Update(em types.EndpointsMap) {
 			em[spn] = endpoints
 		}
 	}
+}
+
+// byEndpoint helps sort Endpoint
+type byEndpoint []k8sproxy.Endpoint
+
+func (p byEndpoint) Len() int {
+	return len(p)
+}
+func (p byEndpoint) Swap(i, j int) {
+	p[i], p[j] = p[j], p[i]
+}
+func (p byEndpoint) Less(i, j int) bool {
+	return p[i].String() < p[j].String()
 }

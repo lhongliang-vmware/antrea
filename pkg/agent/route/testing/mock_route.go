@@ -22,6 +22,7 @@ package testing
 import (
 	gomock "github.com/golang/mock/gomock"
 	config "github.com/vmware-tanzu/antrea/pkg/agent/config"
+	types "github.com/vmware-tanzu/antrea/pkg/agent/proxy/types"
 	net "net"
 	reflect "reflect"
 )
@@ -47,6 +48,34 @@ func NewMockInterface(ctrl *gomock.Controller) *MockInterface {
 // EXPECT returns an object that allows the caller to indicate expected use
 func (m *MockInterface) EXPECT() *MockInterfaceMockRecorder {
 	return m.recorder
+}
+
+// AddNodePort mocks base method
+func (m *MockInterface) AddNodePort(arg0 map[int][]net.IP, arg1 *types.ServiceInfo) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AddNodePort", arg0, arg1)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// AddNodePort indicates an expected call of AddNodePort
+func (mr *MockInterfaceMockRecorder) AddNodePort(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddNodePort", reflect.TypeOf((*MockInterface)(nil).AddNodePort), arg0, arg1)
+}
+
+// AddNodePortConfig mocks base method
+func (m *MockInterface) AddNodePortConfig(arg0 map[int][]net.IP) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AddNodePortConfig", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// AddNodePortConfig indicates an expected call of AddNodePortConfig
+func (mr *MockInterfaceMockRecorder) AddNodePortConfig(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddNodePortConfig", reflect.TypeOf((*MockInterface)(nil).AddNodePortConfig), arg0)
 }
 
 // AddRoutes mocks base method
@@ -75,6 +104,20 @@ func (m *MockInterface) AddSNATRule(arg0 net.IP, arg1 uint32) error {
 func (mr *MockInterfaceMockRecorder) AddSNATRule(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddSNATRule", reflect.TypeOf((*MockInterface)(nil).AddSNATRule), arg0, arg1)
+}
+
+// DeleteNodePort mocks base method
+func (m *MockInterface) DeleteNodePort(arg0 map[int][]net.IP, arg1 *types.ServiceInfo) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DeleteNodePort", arg0, arg1)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// DeleteNodePort indicates an expected call of DeleteNodePort
+func (mr *MockInterfaceMockRecorder) DeleteNodePort(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DeleteNodePort", reflect.TypeOf((*MockInterface)(nil).DeleteNodePort), arg0, arg1)
 }
 
 // DeleteRoutes mocks base method

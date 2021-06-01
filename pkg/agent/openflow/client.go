@@ -20,7 +20,7 @@ import (
 	"net"
 
 	"github.com/contiv/libOpenflow/protocol"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"github.com/vmware-tanzu/antrea/pkg/agent/config"
 	"github.com/vmware-tanzu/antrea/pkg/agent/openflow/cookie"
@@ -107,7 +107,7 @@ type Client interface {
 	// action to maintain the LB decision.
 	// The group with the groupID must be installed before, otherwise the
 	// installation will fail.
-	InstallServiceFlows(groupID binding.GroupIDType, svcIP net.IP, svcPort uint16, protocol binding.Protocol, affinityTimeout uint16) error
+	InstallServiceFlows(groupID binding.GroupIDType, svcIP net.IP, svcPort uint16, protocol binding.Protocol, affinityTimeout uint16, isNodePortLocal bool) error
 	// UninstallServiceFlows removes flows installed by InstallServiceFlows.
 	UninstallServiceFlows(svcIP net.IP, svcPort uint16, protocol binding.Protocol) error
 	// InstallLoadBalancerServiceFromOutsideFlows installs flows for LoadBalancer Service traffic from outside node.
@@ -434,6 +434,7 @@ func (c *client) GetPodFlowKeys(interfaceName string) []string {
 func (c *client) InstallServiceGroup(groupID binding.GroupIDType, withSessionAffinity bool, endpoints []proxy.Endpoint) error {
 	c.replayMutex.RLock()
 	defer c.replayMutex.RUnlock()
+
 	group := c.serviceEndpointGroup(groupID, withSessionAffinity, endpoints...)
 	if err := group.Add(); err != nil {
 		return fmt.Errorf("error when installing Service Endpoints Group: %w", err)
@@ -493,11 +494,29 @@ func (c *client) UninstallEndpointFlows(protocol binding.Protocol, endpoint prox
 	return c.deleteFlows(c.serviceFlowCache, cacheKey)
 }
 
-func (c *client) InstallServiceFlows(groupID binding.GroupIDType, svcIP net.IP, svcPort uint16, protocol binding.Protocol, affinityTimeout uint16) error {
+func (c *client) InstallServiceFlows(groupID binding.GroupIDType, svcIP net.IP, svcPort uint16, protocol binding.Protocol, affinityTimeout uint16, isNodePortLocal bool) error {
 	c.replayMutex.RLock()
 	defer c.replayMutex.RUnlock()
 	var flows []binding.Flow
-	flows = append(flows, c.serviceLBFlow(groupID, svcIP, svcPort, protocol))
+	var gatewayIP net.IP
+
+	if getIPProtocol(svcIP) == binding.ProtocolIP {
+		if c.nodeConfig.GatewayConfig.IPv4 != nil {
+			gatewayIP = c.nodeConfig.GatewayConfig.IPv4
+		} else {
+			gatewayIP = c.nodeConfig.PodIPv4CIDR.IP
+		}
+	} else {
+		if c.nodeConfig.GatewayConfig.IPv6 != nil {
+			gatewayIP = c.nodeConfig.GatewayConfig.IPv6
+		} else {
+			gatewayIP = c.nodeConfig.PodIPv6CIDR.IP
+		}
+	}
+
+	flows = append(flows, c.serviceLBFlow(groupID, svcIP, svcPort, protocol, affinityTimeout != 0))
+	flows = append(flows, c.serviceSNATFlow(svcIP, svcPort, protocol, gatewayIP, isNodePortLocal))
+	flows = append(flows, c.serviceDstMacRewriteFlow(svcIP, svcPort, protocol))
 	if affinityTimeout != 0 {
 		flows = append(flows, c.serviceLearnFlow(groupID, svcIP, svcPort, protocol, affinityTimeout))
 	}
@@ -537,6 +556,11 @@ func (c *client) InstallClusterServiceFlows() error {
 		flows = append(flows, c.serviceHairpinResponseDNATFlow(binding.ProtocolIPv6))
 		flows = append(flows, c.serviceLBBypassFlows(binding.ProtocolIPv6)...)
 	}
+	if c.enabledAntreaNodePort {
+		flows = append(flows, c.serviceNodePortLocalhostSNATFlows()...)
+		flows = append(flows, c.serviceNodePortLocalhostUnsnatFlows()...)
+	}
+
 	if err := c.ofEntryOperations.AddAll(flows); err != nil {
 		return err
 	}
@@ -575,6 +599,16 @@ func (c *client) InstallGatewayFlows() error {
 	// Add flow to ensure the liveness check packet could be forwarded correctly.
 	flows = append(flows, c.localProbeFlow(gatewayIPs, cookie.Default)...)
 	flows = append(flows, c.ctRewriteDstMACFlows(gatewayConfig.MAC, cookie.Default)...)
+	/*
+		if c.enableProxy {
+			if gatewayConfig.IPv6 != nil {
+				flows = append(flows, c.serviceGatewayFlow(true))
+			}
+			if gatewayConfig.IPv4 != nil {
+				flows = append(flows, c.serviceGatewayFlow(false))
+			}
+		}
+	*/
 	// In NoEncap , no traffic from tunnel port
 	if c.encapMode.SupportsEncap() {
 		flows = append(flows, c.l3FwdFlowToGateway(gatewayIPs, gatewayConfig.MAC, cookie.Default)...)
@@ -753,8 +787,10 @@ func (c *client) ReplayFlows() {
 		return true
 	}
 
-	c.groupCache.Range(func(id, gEntry interface{}) bool {
-		if err := gEntry.(binding.Group).Add(); err != nil {
+	c.groupCache.Range(func(id, value interface{}) bool {
+		group := value.(binding.Group)
+		group.Reset()
+		if err := group.Add(); err != nil {
 			klog.Errorf("Error when replaying cached group %d: %v", id, err)
 		}
 		return true

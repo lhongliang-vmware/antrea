@@ -1284,6 +1284,10 @@ func (data *TestData) createService(serviceName string, port, targetPort int32, 
 func (data *TestData) createServiceWithAnnotations(serviceName string, port, targetPort int32, selector map[string]string, affinity bool,
 	serviceType corev1.ServiceType, ipFamily *corev1.IPFamily, annotations map[string]string) (*corev1.Service, error) {
 	affinityType := corev1.ServiceAffinityNone
+	var ipFamilies []corev1.IPFamily
+	if ipFamily != nil {
+		ipFamilies = append(ipFamilies, *ipFamily)
+	}
 	if affinity {
 		affinityType = corev1.ServiceAffinityClientIP
 	}
@@ -1303,9 +1307,9 @@ func (data *TestData) createServiceWithAnnotations(serviceName string, port, tar
 				Port:       port,
 				TargetPort: intstr.FromInt(int(targetPort)),
 			}},
-			Type:     serviceType,
-			Selector: selector,
-			IPFamily: ipFamily,
+			Type:       serviceType,
+			Selector:   selector,
+			IPFamilies: ipFamilies,
 		},
 	}
 	return data.clientset.CoreV1().Services(testNamespace).Create(context.TODO(), &service, metav1.CreateOptions{})
@@ -1322,6 +1326,11 @@ func (data *TestData) createNginxClusterIPService(name string, affinity bool, ip
 		name = "nginx"
 	}
 	return data.createService(name, 80, 80, map[string]string{"app": "nginx"}, affinity, corev1.ServiceTypeClusterIP, ipFamily)
+}
+
+// createNginxNodePortService create a NodePort nginx service with the given name.
+func (data *TestData) createNginxNodePortService(affinity bool, ipFamily *corev1.IPFamily) (*corev1.Service, error) {
+	return data.createService("nginx", 80, 80, map[string]string{"app": "nginx"}, affinity, corev1.ServiceTypeNodePort, ipFamily)
 }
 
 func (data *TestData) createNginxLoadBalancerService(affinity bool, ingressIPs []string, ipFamily *corev1.IPFamily) (*corev1.Service, error) {

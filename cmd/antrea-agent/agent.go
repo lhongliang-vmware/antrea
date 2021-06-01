@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"k8s.io/client-go/informers"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"github.com/vmware-tanzu/antrea/pkg/agent"
 	"github.com/vmware-tanzu/antrea/pkg/agent/apiserver"
@@ -98,10 +98,22 @@ func run(o *Options) error {
 	ovsDatapathType := ovsconfig.OVSDatapathType(o.config.OVSDatapathType)
 	ovsBridgeClient := ovsconfig.NewOVSBridge(o.config.OVSBridge, ovsDatapathType, ovsdbConnection)
 	ovsBridgeMgmtAddr := ofconfig.GetMgmtAddress(o.config.OVSRunDir, o.config.OVSBridge)
+	var nodePortAddresses map[int][]net.IP
+	if features.DefaultFeatureGate.Enabled(features.AntreaProxyNodePort) {
+		nodePortAddresses, err = config.GetAvailableNodePortAddresses(o.config.NodePortAddresses)
+		if err != nil {
+			return fmt.Errorf("error getting NodePort addresses: %v", err)
+		}
+	}
+
 	ofClient := openflow.NewClient(o.config.OVSBridge, ovsBridgeMgmtAddr, ovsDatapathType,
+		o.nodePortVirtualIP,
+		o.nodePortVirtualIPv6,
+		nodePortAddresses,
 		features.DefaultFeatureGate.Enabled(features.AntreaProxy),
 		features.DefaultFeatureGate.Enabled(features.AntreaPolicy),
-		features.DefaultFeatureGate.Enabled(features.Egress))
+		features.DefaultFeatureGate.Enabled(features.Egress),
+		features.DefaultFeatureGate.Enabled(features.AntreaProxyNodePort))
 
 	_, serviceCIDRNet, _ := net.ParseCIDR(o.config.ServiceCIDR)
 	var serviceCIDRNetv6 *net.IPNet
@@ -127,6 +139,10 @@ func run(o *Options) error {
 	// networkReadyCh is used to notify that the Node's network is ready.
 	// Functions that rely on the Node's network should wait for the channel to close.
 	networkReadyCh := make(chan struct{})
+	// set up signal capture: the first SIGTERM / SIGINT signal is handled gracefully and will
+	// cause the stopCh channel to be closed; if another signal is received before the program
+	// exits, we will force exit.
+	stopCh := signals.RegisterSignalHandlers()
 	// Initialize agent and node network.
 	agentInitializer := agent.NewInitializer(
 		k8sClient,
@@ -141,6 +157,7 @@ func run(o *Options) error {
 		serviceCIDRNetv6,
 		networkConfig,
 		networkReadyCh,
+		stopCh,
 		features.DefaultFeatureGate.Enabled(features.AntreaProxy))
 	err = agentInitializer.Initialize()
 	if err != nil {
@@ -202,15 +219,41 @@ func run(o *Options) error {
 	if features.DefaultFeatureGate.Enabled(features.AntreaProxy) {
 		v4Enabled := config.IsIPv4Enabled(nodeConfig, networkConfig.TrafficEncapMode)
 		v6Enabled := config.IsIPv6Enabled(nodeConfig, networkConfig.TrafficEncapMode)
+		nodePortEnabled := features.DefaultFeatureGate.Enabled(features.AntreaProxyNodePort)
+		var err error
 		switch {
 		case v4Enabled && v6Enabled:
-			proxier = proxy.NewDualStackProxier(nodeConfig.Name, informerFactory, ofClient)
+			proxier = proxy.NewDualStackProxier(o.nodePortVirtualIP,
+				o.nodePortVirtualIPv6,
+				nodePortAddresses,
+				nodeConfig.Name,
+				informerFactory,
+				ofClient,
+				routeClient,
+				nodePortEnabled)
 		case v4Enabled:
-			proxier = proxy.NewProxier(nodeConfig.Name, informerFactory, ofClient, false)
+			proxier = proxy.NewProxier(o.nodePortVirtualIP,
+				nodePortAddresses,
+				nodeConfig.Name,
+				informerFactory,
+				ofClient,
+				routeClient,
+				v6Enabled,
+				nodePortEnabled)
 		case v6Enabled:
-			proxier = proxy.NewProxier(nodeConfig.Name, informerFactory, ofClient, true)
+			proxier = proxy.NewProxier(o.nodePortVirtualIPv6,
+				nodePortAddresses,
+				nodeConfig.Name,
+				informerFactory,
+				ofClient,
+				routeClient,
+				v6Enabled,
+				nodePortEnabled)
 		default:
-			return fmt.Errorf("at least one of IPv4 or IPv6 should be enabled")
+			err = fmt.Errorf("at least one of IPv4 or IPv6 should be enabled")
+		}
+		if err != nil {
+			return fmt.Errorf("error when creating Antrea Proxy: %w", err)
 		}
 	}
 
@@ -256,10 +299,6 @@ func run(o *Options) error {
 	if err := antreaClientProvider.RunOnce(); err != nil {
 		return err
 	}
-	// set up signal capture: the first SIGTERM / SIGINT signal is handled gracefully and will
-	// cause the stopCh channel to be closed; if another signal is received before the program
-	// exits, we will force exit.
-	stopCh := signals.RegisterSignalHandlers()
 
 	// Start the NPL agent.
 	if features.DefaultFeatureGate.Enabled(features.NodePortLocal) {

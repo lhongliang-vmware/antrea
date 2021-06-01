@@ -28,9 +28,9 @@ RUN_ALL=true
 RUN_SETUP_ONLY=false
 RUN_CLEANUP_ONLY=false
 KUBECONFIG_PATH="$HOME/jenkins/out/aks"
-TEST_FAILURE=false
+TEST_SCRIPT_RC=0
 MODE="report"
-KUBE_CONFORMANCE_IMAGE_VERSION=v1.18.5
+KUBE_CONFORMANCE_IMAGE_VERSION=v1.19.4
 
 _usage="Usage: $0 [--cluster-name <AKSClusterNameToUse>] [--kubeconfig <KubeconfigSavePath>] [--k8s-version <ClusterVersion>]\
                   [--azure-app-id <AppID>] [--azure-tenant-id <TenantID>] [--azure-password <Password>] \
@@ -226,7 +226,7 @@ function deliver_antrea_to_aks() {
 
     for IP in ${NODE_IPS}; do
         scp -o StrictHostKeyChecking=no -i ${SSH_PRIVATE_KEY_PATH} ${antrea_image}.tar azureuser@${IP}:~
-        ssh -o StrictHostKeyChecking=no -i ${SSH_PRIVATE_KEY_PATH} -n azureuser@${IP} "sudo docker load -i ~/${antrea_image}.tar ; sudo docker tag ${DOCKER_IMG_NAME}:${DOCKER_IMG_VERSION} ${DOCKER_IMG_NAME}:latest"
+        ssh -o StrictHostKeyChecking=no -i ${SSH_PRIVATE_KEY_PATH} -n azureuser@${IP} "sudo ctr -n=k8s.io images import ~/${antrea_image}.tar ; sudo ctr -n=k8s.io images tag ${DOCKER_IMG_NAME}:${DOCKER_IMG_VERSION} ${DOCKER_IMG_NAME}:latest"
     done
     rm ${antrea_image}.tar
 
@@ -256,16 +256,24 @@ function run_conformance() {
     echo "=== Running Antrea Conformance and Network Policy Tests ==="
     ${GIT_CHECKOUT_DIR}/ci/run-k8s-e2e-tests.sh --e2e-conformance --e2e-network-policy \
       --kube-conformance-image-version ${KUBE_CONFORMANCE_IMAGE_VERSION} \
-      --log-mode ${MODE} > ${GIT_CHECKOUT_DIR}/aks-test.log
+      --log-mode ${MODE} > ${GIT_CHECKOUT_DIR}/aks-test.log || TEST_SCRIPT_RC=$?
 
-    if grep -Fxq "Failed tests:" ${GIT_CHECKOUT_DIR}/aks-test.log
-    then
-        echo "Failed cases exist."
-        echo "=== FAILURE !!! ==="
-    else
+    if [[ $TEST_SCRIPT_RC -eq 0 ]]; then
         echo "All tests passed."
         echo "=== SUCCESS !!! ==="
+    elif [[ $TEST_SCRIPT_RC -eq 1 ]]; then
+        echo "Failed test cases exist."
+        echo "=== FAILURE !!! ==="
+    else
+        echo "Unexpected error when running tests."
+        echo "=== FAILURE !!! ==="
     fi
+
+    echo "=== Cleanup Antrea Installation ==="
+    for antrea_yml in ${GIT_CHECKOUT_DIR}/build/yamls/*.yml
+    do
+        kubectl delete -f ${antrea_yml} --ignore-not-found=true || true
+    done
 }
 
 function cleanup_cluster() {
@@ -301,6 +309,6 @@ if [[ "$RUN_ALL" == true || "$RUN_CLEANUP_ONLY" == true ]]; then
     cleanup_cluster
 fi
 
-if [[ "$RUN_CLEANUP_ONLY" == false &&  "$TEST_FAILURE" == true ]]; then
+if [[ "$RUN_CLEANUP_ONLY" == false && $TEST_SCRIPT_RC -ne 0 ]]; then
     exit 1
 fi

@@ -23,7 +23,7 @@ import (
 	"github.com/rakelkar/gonetsh/netroute"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"github.com/vmware-tanzu/antrea/pkg/agent/config"
 )
@@ -53,7 +53,7 @@ func TestRouteOperation(t *testing.T) {
 	nr := netroute.New()
 	defer nr.Exit()
 
-	client, err := NewClient(serviceCIDR, &config.NetworkConfig{}, false)
+	client, err := NewClient(nil, nil, serviceCIDR, &config.NetworkConfig{}, false, false)
 	require.Nil(t, err)
 	nodeConfig := &config.NodeConfig{
 		GatewayConfig: &config.GatewayConfig{
