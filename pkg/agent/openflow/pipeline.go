@@ -371,8 +371,8 @@ var (
 	hairpinIP           = net.ParseIP("169.254.169.252").To4()
 	hairpinIPv6         = net.ParseIP("fc00::aabb:ccdd:eeff").To16()
 
-	nodePortVirtualIP   = net.ParseIP("169.254.169.253").To4()
-	nodePortVirtualIPv6 = net.ParseIP("fc01::aabb:ccdd:eeff").To16()
+	serviceVirtualIPv4 = net.ParseIP("169.254.169.253").To4()
+	serviceVirtualIPv6 = net.ParseIP("fc01::aabb:ccdd:eeff").To16()
 )
 
 type OFEntryOperations interface {
@@ -1406,13 +1406,13 @@ func (c *client) serviceHairpinResponseDNATFlow(ipProtocol binding.Protocol) bin
 		Done()
 }
 
-// nodePortHostEndpointResponseDNATFlow generates the flow which transforms destination IP of the NodePort hairpin traffic
-// to Antrea gateway's IP. It is used for recovering destination IP of NodePort response traffic from host network Endpoint.
-func (c *client) nodePortHostEndpointResponseDNATFlow(gatewayIP net.IP) binding.Flow {
+// serviceHostEndpointResponseDNATFlow generates the flow which sets destination IP of Service hairpin response traffic
+// to Antrea gateway's IP.
+func (c *client) serviceHostEndpointResponseDNATFlow(gatewayIP net.IP) binding.Flow {
 	ipProtocol := getIPProtocol(gatewayIP)
-	virtualIP := nodePortVirtualIP
+	virtualIP := serviceVirtualIPv4
 	if ipProtocol == binding.ProtocolIPv6 {
-		virtualIP = nodePortVirtualIPv6
+		virtualIP = serviceVirtualIPv6
 	}
 
 	return c.pipeline[serviceHairpinTable].BuildFlow(priorityNormal).MatchProtocol(ipProtocol).
@@ -2174,15 +2174,14 @@ func (c *client) hairpinSNATFlow(endpointIP net.IP) binding.Flow {
 		Done()
 }
 
-// nodePortHostEndpointSNATFlow generates the flow which does SNAT for NodePort traffic whose Endpoint is on host network.
-// If source IP of NodePort traffic is masqueraded to Antrea gateway's IP and destination IP is on host network, the traffic
-// should be sent out of OVS via Antrea gateway. This is hairpin traffic, so its source IP should be masqueraded to
-// NodePort virtual IP.
-func (c *client) nodePortHostEndpointSNATFlow(gatewayIP net.IP) binding.Flow {
+// serviceHostEndpointSNATFlow generates the flow that performs SNAT for Service traffic from Antrea gateway and
+// Endpoint of the Service is on host network. That is hairpin traffic, so its source IP should be masqueraded to a
+// virtual IP.
+func (c *client) serviceHostEndpointSNATFlow(gatewayIP net.IP) binding.Flow {
 	ipProtocol := getIPProtocol(gatewayIP)
-	virtualIP := nodePortVirtualIP
+	virtualIP := serviceVirtualIPv4
 	if ipProtocol == binding.ProtocolIPv6 {
-		virtualIP = nodePortVirtualIPv6
+		virtualIP = serviceVirtualIPv6
 	}
 	return c.pipeline[hairpinSNATTable].BuildFlow(priorityNormal).
 		Cookie(c.cookieAllocator.Request(cookie.Service).Raw()).
@@ -2195,13 +2194,14 @@ func (c *client) nodePortHostEndpointSNATFlow(gatewayIP net.IP) binding.Flow {
 		Done()
 }
 
-// noEncapNodePortSNATFlow generates the flow which does SNAT for NodePort traffic accessing remote Endpoints when noEncap mode
-// is enabled.
-func (c *client) noEncapNodePortSNATFlow(gatewayIP net.IP, peerPodCIDR net.IPNet) binding.Flow {
+// noEncapServiceSNATFlow generates the flow that performs SNAT for Service traffic when noEncap mode is enabled.
+// When Service traffic is from Antrea gateway and Endpoint(s) is(are) on remote nodes, that's hairpin traffic, so its
+//source IP should be masqueraded to a virtual IP.
+func (c *client) noEncapServiceSNATFlow(gatewayIP net.IP, peerPodCIDR net.IPNet) binding.Flow {
 	ipProtocol := getIPProtocol(gatewayIP)
-	virtualIP := nodePortVirtualIP
+	virtualIP := serviceVirtualIPv4
 	if ipProtocol == binding.ProtocolIPv6 {
-		virtualIP = nodePortVirtualIPv6
+		virtualIP = serviceVirtualIPv6
 	}
 
 	return c.pipeline[hairpinSNATTable].BuildFlow(priorityNormal).

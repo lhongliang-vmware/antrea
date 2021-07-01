@@ -430,6 +430,10 @@ func (p *proxier) installServices() {
 				klog.Errorf("Error when installing Service flows: %v", err)
 				continue
 			}
+
+			if err := p.routeClient.AddServiceRoute(svcInfo.ClusterIP(), p.isIPv6); err != nil {
+				klog.Errorf("Error when install ClusterIP Service route: %v", err)
+			}
 			// Install OpenFlow entries for the ingress IPs of LoadBalancer Service.
 			// The LoadBalancer Service should be accessible from Pod, Node and
 			// external host.

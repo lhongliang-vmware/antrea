@@ -61,6 +61,9 @@ type Interface interface {
 	// DeleteNodePort should delete related configuration about the NodePort Service to TC on Linux.
 	DeleteNodePort(nodePortIPMap map[int][]net.IP, svcInfo *types.ServiceInfo, isIPv6 bool) error
 
+	// AddServiceRoute adds route for a Service IP.
+	AddServiceRoute(svcIP net.IP, isIPv6 bool) error
+
 	// Run starts the sync loop.
 	Run(stopCh <-chan struct{})
 }

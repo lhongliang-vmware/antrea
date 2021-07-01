@@ -43,6 +43,7 @@ import (
 	"antrea.io/antrea/pkg/agent/route"
 	"antrea.io/antrea/pkg/agent/stats"
 	"antrea.io/antrea/pkg/agent/types"
+	"antrea.io/antrea/pkg/agent/util"
 	crdinformers "antrea.io/antrea/pkg/client/informers/externalversions"
 	"antrea.io/antrea/pkg/features"
 	"antrea.io/antrea/pkg/log"
@@ -169,7 +170,7 @@ func run(o *Options) error {
 	if features.DefaultFeatureGate.Enabled(features.AntreaProxy) {
 		var nodePortIPMap, nodePortIPv6Map map[int][]net.IP
 		if features.DefaultFeatureGate.Enabled(features.AntreaProxyNodePort) {
-			nodePortIPMap, nodePortIPv6Map, err = proxy.GetAvailableNodePortIPs(o.config.NodePortAddresses, o.config.HostGateway)
+			nodePortIPMap, nodePortIPv6Map, err = util.GetAvailableNodePortIPs(o.config.NodePortAddresses, o.config.HostGateway)
 			if err != nil {
 				return fmt.Errorf("get available NodePort IP addresses with error: %v", err)
 			}

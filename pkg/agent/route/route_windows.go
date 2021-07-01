@@ -256,3 +256,7 @@ func (c *Client) AddNodePort(nodePortIPMap map[int][]net.IP, svcInfo *types.Serv
 func (c *Client) DeleteNodePort(nodePortIPMap map[int][]net.IP, svcInfo *types.ServiceInfo, isIPv6 bool) error {
 	return nil
 }
+
+func (c *Client) AddServiceRoute(svcIP net.IP, isIPv6 bool) error {
+	return fmt.Errorf("not implemented")
+}

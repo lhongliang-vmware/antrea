@@ -397,15 +397,13 @@ func (c *client) InstallNodeFlows(hostname string,
 			flows = append(flows, c.l3FwdFlowToRemote(localGatewayMAC, *peerPodCIDR, tunnelPeerIP, cookie.Node))
 		} else {
 			flows = append(flows, c.l3FwdFlowToRemoteViaRouting(localGatewayMAC, remoteGatewayMAC, cookie.Node, tunnelPeerIP, peerPodCIDR)...)
-			// For NodePort traffic from remote, its Endpoints are not on local node, the traffic should be sent out of
-			// OVS via Antrea gateway, and this is hairpin traffic.
-			if c.enabledAntreaNodePort {
-				if c.IsIPv4Enabled() {
-					flows = append(flows, c.noEncapNodePortSNATFlow(c.nodeConfig.GatewayConfig.IPv4, *peerPodCIDR))
-				}
-				if c.IsIPv6Enabled() {
-					flows = append(flows, c.noEncapNodePortSNATFlow(c.nodeConfig.GatewayConfig.IPv6, *peerPodCIDR))
-				}
+			// For Service traffic from Antrea gateway, and its Endpoints are not on local node, the traffic should be
+			// sent out of OVS via Antrea gateway. That is hairpin traffic.
+			if c.IsIPv4Enabled() {
+				flows = append(flows, c.noEncapServiceSNATFlow(c.nodeConfig.GatewayConfig.IPv4, *peerPodCIDR))
+			}
+			if c.IsIPv6Enabled() {
+				flows = append(flows, c.noEncapServiceSNATFlow(c.nodeConfig.GatewayConfig.IPv6, *peerPodCIDR))
 			}
 		}
 	}
@@ -601,25 +599,21 @@ func (c *client) InstallDefaultServiceFlows() error {
 		c.l2ForwardOutputServiceHairpinFlow(),
 	}
 	if c.IsIPv4Enabled() {
+		gatewayIP := c.nodeConfig.GatewayConfig.IPv4
 		flows = append(flows, c.serviceHairpinResponseDNATFlow(binding.ProtocolIP))
 		flows = append(flows, c.serviceLBBypassFlows(binding.ProtocolIP)...)
-		if c.enabledAntreaNodePort {
-			gatewayIP := c.nodeConfig.GatewayConfig.IPv4
-			flows = append(flows, c.arpResponderFlow(nodePortVirtualIP, cookie.Service))
-			flows = append(flows, c.l3NodePortFlowToHostEndpointViaGW(gatewayIP, cookie.Service))
-			flows = append(flows, c.nodePortHostEndpointSNATFlow(gatewayIP))
-			flows = append(flows, c.nodePortHostEndpointResponseDNATFlow(gatewayIP))
-		}
+		flows = append(flows, c.arpResponderFlow(serviceVirtualIPv4, cookie.Service))
+		flows = append(flows, c.l3NodePortFlowToHostEndpointViaGW(gatewayIP, cookie.Service))
+		flows = append(flows, c.serviceHostEndpointSNATFlow(gatewayIP))
+		flows = append(flows, c.serviceHostEndpointResponseDNATFlow(gatewayIP))
 	}
 	if c.IsIPv6Enabled() {
+		gatewayIP := c.nodeConfig.GatewayConfig.IPv6
 		flows = append(flows, c.serviceHairpinResponseDNATFlow(binding.ProtocolIPv6))
 		flows = append(flows, c.serviceLBBypassFlows(binding.ProtocolIPv6)...)
-		if c.enabledAntreaNodePort {
-			gatewayIP := c.nodeConfig.GatewayConfig.IPv6
-			flows = append(flows, c.l3NodePortFlowToHostEndpointViaGW(gatewayIP, cookie.Service))
-			flows = append(flows, c.nodePortHostEndpointSNATFlow(gatewayIP))
-			flows = append(flows, c.nodePortHostEndpointResponseDNATFlow(gatewayIP))
-		}
+		flows = append(flows, c.l3NodePortFlowToHostEndpointViaGW(gatewayIP, cookie.Service))
+		flows = append(flows, c.serviceHostEndpointSNATFlow(gatewayIP))
+		flows = append(flows, c.serviceHostEndpointResponseDNATFlow(gatewayIP))
 	}
 	if err := c.ofEntryOperations.AddAll(flows); err != nil {
 		return err

@@ -59,6 +59,10 @@ const (
 	antreaPostRoutingChain = "ANTREA-POSTROUTING"
 	antreaOutputChain      = "ANTREA-OUTPUT"
 	antreaMangleChain      = "ANTREA-MANGLE"
+
+	clusterIPv4FromNodeRouteKey      = "ClusterIPv4FromNodeRoute"
+	clusterIPv6FromNodeRouteKey      = "ClusterIPv6FromNodeRoute"
+	clusterIPv6FromNodeRouteNeighKey = "ClusterIPv6FromNodeNeighbor"
 )
 
 // Client implements Interface.
@@ -72,8 +76,8 @@ var (
 	// smaller values. It is meant to be used internally by Run.
 	IPTablesSyncInterval = 60 * time.Second
 
-	nodePortVirtualIP   = net.ParseIP("169.254.169.253")
-	nodePortVirtualIPv6 = net.ParseIP("fc01::aabb:ccdd:eeff")
+	serviceVirtualIPv4 = net.ParseIP("169.254.169.253")
+	serviceVirtualIPv6 = net.ParseIP("fc01::aabb:ccdd:eeff")
 )
 
 // Client takes care of routing container packets in host network, coordinating ip route, ip rule, iptables and ipset.
@@ -443,14 +447,14 @@ func (c *Client) restoreIptablesData(podCIDR *net.IPNet, podIPSet string, snatMa
 			writeLine(iptablesData, []string{
 				"-A", antreaPostRoutingChain,
 				"-m", "comment", "--comment", `"Antrea: masquerade NodePort host network Endpoint traffic"`,
-				"-s", nodePortVirtualIPv6.String(),
+				"-s", serviceVirtualIPv6.String(),
 				"-j", iptables.MasqueradeTarget,
 			}...)
 		} else {
 			writeLine(iptablesData, []string{
 				"-A", antreaPostRoutingChain,
 				"-m", "comment", "--comment", `"Antrea: masquerade NodePort host network Endpoint traffic"`,
-				"-s", nodePortVirtualIP.String(),
+				"-s", serviceVirtualIPv4.String(),
 				"-j", iptables.MasqueradeTarget,
 			}...)
 		}
@@ -800,48 +804,37 @@ func (c *Client) DeleteSNATRule(mark uint32) error {
 }
 
 func (c *Client) addNodePortRoute(isIPv6 bool) error {
-	var route *netlink.Route
-	var nodeportIP *net.IP
-
+	linkIndex := c.nodeConfig.GatewayConfig.LinkIndex
+	var nodePortVirtualIP *net.IP
+	var networkMaskPrefix int
 	if !isIPv6 {
-		nodeportIP = &nodePortVirtualIP
-		route = &netlink.Route{
-			Dst: &net.IPNet{
-				IP:   *nodeportIP,
-				Mask: net.IPv4Mask(255, 255, 255, 255),
-			},
-			Gw:    *nodeportIP,
-			Flags: int(netlink.FLAG_ONLINK),
-		}
-		route.LinkIndex = c.nodeConfig.GatewayConfig.LinkIndex
+		nodePortVirtualIP = &serviceVirtualIPv4
+		networkMaskPrefix = 32
 	} else {
-		nodeportIP = &nodePortVirtualIPv6
-		route = &netlink.Route{
-			Dst: &net.IPNet{
-				IP:   *nodeportIP,
-				Mask: net.IPMask{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
-			},
-			LinkIndex: c.nodeConfig.GatewayConfig.LinkIndex,
-		}
+		nodePortVirtualIP = &serviceVirtualIPv6
+		networkMaskPrefix = 128
 	}
-	if err := netlink.RouteReplace(route); err != nil {
-		return fmt.Errorf("failed to install NodePort route: %w", err)
+
+	route, err := generateOnlinkRoute(nodePortVirtualIP, networkMaskPrefix, nodePortVirtualIP, linkIndex)
+	if err != nil {
+		return fmt.Errorf("failed to generate route for NodePort virtual IP: %w", err)
+	}
+	if err = netlink.RouteReplace(route); err != nil {
+		return fmt.Errorf("failed to install route for NodePort virtual IP: %w", err)
 	}
 
 	if isIPv6 {
-		neigh := &netlink.Neigh{
-			LinkIndex:    c.nodeConfig.GatewayConfig.LinkIndex,
-			Family:       netlink.FAMILY_V6,
-			State:        netlink.NUD_PERMANENT,
-			IP:           *nodeportIP,
-			HardwareAddr: globalVMAC,
+		neigh, err := generateIPv6Neigh(nodePortVirtualIP, linkIndex)
+		if err != nil {
+			return fmt.Errorf("failed to generate neigh for NodePort virtual IP: %w", err)
 		}
-		if err := netlink.NeighSet(neigh); err != nil {
+		if err = netlink.NeighSet(neigh); err != nil {
 			return fmt.Errorf("failed to add NodePort route neighbor %v to gw %s: %v", neigh, c.nodeConfig.GatewayConfig.Name, err)
 		}
-		c.nodeNeighbors.Store(nodeportIP.String(), neigh)
+		c.nodeNeighbors.Store(nodePortVirtualIP.String(), neigh)
 	}
-	c.nodeRoutes.Store(nodeportIP.String(), []*netlink.Route{route})
+	c.nodeRoutes.Store(nodePortVirtualIP.String(), []*netlink.Route{route})
+
 	return nil
 }
 
@@ -964,6 +957,97 @@ func (c *Client) DeleteNodePort(nodePortIPMap map[int][]net.IP, svcInfo *proxyty
 	return nil
 }
 
+func (c *Client) AddServiceRoute(svcIP net.IP, isIPv6 bool) error {
+	routeKey := clusterIPv4FromNodeRouteKey
+	if isIPv6 {
+		routeKey = clusterIPv6FromNodeRouteKey
+	}
+
+	routeVal, exists := c.nodeRoutes.Load(routeKey)
+	if exists {
+		curRoute := routeVal.([]*netlink.Route)[0]
+		// If the route exists, check that whether the route can cover the ClusterIP.
+		if !curRoute.Dst.Contains(svcIP) {
+			// If not, generate a new destination ipNet.
+			newDst, err := util.ExtendCIDRWithIP(curRoute.Dst, svcIP)
+			if err != nil {
+				return fmt.Errorf("extend destination route CIDR with error: %v", err)
+			}
+
+			// Generate a new route with new destination ipNet.
+			networkMaskPrefix, _ := newDst.Mask.Size()
+			newRoute, err := generateOnlinkRoute(&newDst.IP, networkMaskPrefix, &curRoute.Gw, curRoute.LinkIndex)
+			if err != nil {
+				return fmt.Errorf("failed to generate new route %s", svcIP.String())
+			}
+			// Install new route first.
+			if err = netlink.RouteReplace(newRoute); err != nil {
+				return fmt.Errorf("failed to install new route: %w", err)
+			}
+			// Remote old route.
+			if err = netlink.RouteDel(curRoute); err != nil {
+				return fmt.Errorf("failed to uninstall old route: %w", err)
+			}
+
+			// Add IPv6 neigh.
+			if isIPv6 {
+				neigh, _ := c.nodeNeighbors.Load(clusterIPv6FromNodeRouteNeighKey)
+				curNeigh := neigh.(*netlink.Neigh)
+				newNeigh, err := generateIPv6Neigh(&newDst.IP, curNeigh.LinkIndex)
+				if err != nil {
+					fmt.Errorf("failed to generate new neigh: %w", err)
+				}
+				// Set new neigh first.
+				if err = netlink.NeighSet(newNeigh); err != nil {
+					return fmt.Errorf("failed to add new route neighbor %v to gw %s: %v", newNeigh, c.nodeConfig.GatewayConfig.Name, err)
+				}
+				// Remote old neigh.
+				if err = netlink.NeighDel(curNeigh); err != nil {
+					return fmt.Errorf("failed to delete old neighbor %v to gw %s: %v", curNeigh, c.nodeConfig.GatewayConfig.Name, err)
+				}
+				c.nodeNeighbors.Store(clusterIPv6FromNodeRouteNeighKey, newNeigh)
+			}
+			c.nodeRoutes.Store(routeKey, []*netlink.Route{newRoute})
+		} else {
+			klog.V(4).Infof("Current route can route ClusterIP %v to Antrea gateway", svcIP)
+		}
+	} else {
+		// The route doesn't exist, create one.
+		var networkMaskPrefix int
+		var gw *net.IP
+		if isIPv6 {
+			networkMaskPrefix = 128
+			gw = &serviceVirtualIPv6
+		} else {
+			networkMaskPrefix = 32
+			gw = &serviceVirtualIPv4
+		}
+
+		linkIndex := c.nodeConfig.GatewayConfig.LinkIndex
+		route, err := generateOnlinkRoute(&svcIP, networkMaskPrefix, gw, linkIndex)
+		if err != nil {
+			return fmt.Errorf("failed to generate new route %s", svcIP.String())
+		}
+		if err := netlink.RouteReplace(route); err != nil {
+			return fmt.Errorf("failed to install new ClusterIP route: %w", err)
+		}
+
+		if isIPv6 {
+			neigh, err := generateIPv6Neigh(&svcIP, linkIndex)
+			if err != nil {
+				fmt.Errorf("failed to generate new neigh: %w", err)
+			}
+			if err := netlink.NeighSet(neigh); err != nil {
+				return fmt.Errorf("failed to add new Cluster route neighbor %v to gw %s: %v", neigh, c.nodeConfig.GatewayConfig.Name, err)
+			}
+			c.nodeNeighbors.Store(clusterIPv6FromNodeRouteNeighKey, neigh)
+		}
+		c.nodeRoutes.Store(routeKey, []*netlink.Route{route})
+	}
+
+	return nil
+}
+
 func getProtocol(protocol v1.Protocol) int {
 	if protocol == v1.ProtocolTCP {
 		return unix.IPPROTO_TCP
@@ -973,4 +1057,56 @@ func getProtocol(protocol v1.Protocol) int {
 		return unix.IPPROTO_SCTP
 	}
 	return -1
+}
+
+func generateOnlinkRoute(ip *net.IP, maskPrefix int, gw *net.IP, linkIndex int) (*netlink.Route, error) {
+	var isIPv6 bool
+	if ip.To4() != nil {
+		if gw.To4() == nil {
+			return nil, fmt.Errorf("gateway %s is not an valid IPv4 address", gw.String())
+		}
+		if maskPrefix > 32 {
+			return nil, fmt.Errorf("network mask should be less or equal to 32 as %s is an IPv4 address", ip.String())
+		}
+	} else {
+		isIPv6 = true
+		if maskPrefix > 128 {
+			return nil, fmt.Errorf("network mask should be less or equal to 32 as %s is an IPv6 address", ip.String())
+		}
+	}
+
+	var route *netlink.Route
+	if !isIPv6 {
+		route = &netlink.Route{
+			Dst: &net.IPNet{
+				IP:   *ip,
+				Mask: net.CIDRMask(maskPrefix, 32),
+			},
+			Gw:    *gw,
+			Flags: int(netlink.FLAG_ONLINK),
+		}
+	} else {
+		route = &netlink.Route{
+			Dst: &net.IPNet{
+				IP:   *ip,
+				Mask: net.CIDRMask(maskPrefix, 128),
+			},
+		}
+	}
+	route.LinkIndex = linkIndex
+	return route, nil
+}
+
+func generateIPv6Neigh(ip *net.IP, linkIndex int) (*netlink.Neigh, error) {
+	if ip.To16() == nil {
+		return nil, fmt.Errorf("%s is not an IPv6 address", ip.String())
+	}
+	neigh := &netlink.Neigh{
+		LinkIndex:    linkIndex,
+		Family:       netlink.FAMILY_V6,
+		State:        netlink.NUD_PERMANENT,
+		IP:           *ip,
+		HardwareAddr: globalVMAC,
+	}
+	return neigh, nil
 }

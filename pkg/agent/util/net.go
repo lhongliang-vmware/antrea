@@ -149,3 +149,58 @@ func GetIPWithFamily(ips []net.IP, addrFamily uint8) (net.IP, error) {
 		return nil, errors.New("no IP found with IPv4 AddressFamily")
 	}
 }
+
+// ExtendCIDRWithIP is used for extending an IPNet with an IP.
+func ExtendCIDRWithIP(ipNet *net.IPNet, ip net.IP) (*net.IPNet, error) {
+	cpl := commonPrefixLen(ipNet.IP, ip)
+	if cpl == 0 {
+		return nil, fmt.Errorf("invalid common prefix length")
+	}
+	_, newIpNet, err := net.ParseCIDR(fmt.Sprintf("%s/%d", ipNet.IP.String(), cpl))
+	if err != nil {
+		return nil, err
+	}
+	return newIpNet, nil
+}
+
+/*
+This is copied from net/addrselect.go as this function cannot be used outside of standard lib net.
+Modifies:
+- Replace argument type IP with type net.IP.
+*/
+func commonPrefixLen(a, b net.IP) (cpl int) {
+	if a4 := a.To4(); a4 != nil {
+		a = a4
+	}
+	if b4 := b.To4(); b4 != nil {
+		b = b4
+	}
+	if len(a) != len(b) {
+		return 0
+	}
+	// If IPv6, only up to the prefix (first 64 bits)
+	if len(a) > 8 {
+		a = a[:8]
+		b = b[:8]
+	}
+	for len(a) > 0 {
+		if a[0] == b[0] {
+			cpl += 8
+			a = a[1:]
+			b = b[1:]
+			continue
+		}
+		bits := 8
+		ab, bb := a[0], b[0]
+		for {
+			ab >>= 1
+			bb >>= 1
+			bits--
+			if ab == bb {
+				cpl += bits
+				return
+			}
+		}
+	}
+	return
+}

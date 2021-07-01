@@ -92,6 +92,20 @@ func (mr *MockInterfaceMockRecorder) AddSNATRule(arg0, arg1 interface{}) *gomock
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddSNATRule", reflect.TypeOf((*MockInterface)(nil).AddSNATRule), arg0, arg1)
 }
 
+// AddServiceRoute mocks base method
+func (m *MockInterface) AddServiceRoute(arg0 net.IP, arg1 bool) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "AddServiceRoute", arg0, arg1)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// AddServiceRoute indicates an expected call of AddServiceRoute
+func (mr *MockInterfaceMockRecorder) AddServiceRoute(arg0, arg1 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddServiceRoute", reflect.TypeOf((*MockInterface)(nil).AddServiceRoute), arg0, arg1)
+}
+
 // DeleteNodePort mocks base method
 func (m *MockInterface) DeleteNodePort(arg0 map[int][]net.IP, arg1 *types.ServiceInfo, arg2 bool) error {
 	m.ctrl.T.Helper()
